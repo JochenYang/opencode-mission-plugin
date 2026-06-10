@@ -1,0 +1,11 @@
+# Build artifacts
+node_modules/
+dist/
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/
+*.swp

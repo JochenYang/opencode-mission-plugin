@@ -1,0 +1,346 @@
+// ─────────────────────────────────────────────────────────────────────────────
+//  MissionStore
+//
+// State machine + budget accumulation + persistence. The only entry point for
+// any mission mutation. All transitions go through this class to guarantee
+// legality and consistent budget tracking.
+// ─────────────────────────────────────────────────────────────────────────────
+
+import type {
+  AbortReason,
+  BudgetSnapshot,
+  ContinuationDecision,
+  Mission,
+  MissionActor,
+  MissionBudget,
+  MissionBudgetLimits,
+  MissionStatus,
+  UpdateMissionStatus,
+  VerificationReport,
+} from "./types.js"
+import { isOverBudget } from "./utils/format.js"
+import type { SessionHttp } from "./utils/session-http.js"
+
+// ── Constants ───────────────────────────────────────────────────────────────
+
+const SOFT_TURN_CAP = 100
+
+// ── MissionStore ─────────────────────────────────────────────────────────────
+
+export class MissionStore {
+  private http: SessionHttp
+
+  constructor(http: SessionHttp) {
+    this.http = http
+  }
+
+  // ── Read ───────────────────────────────────────────────────────────────
+
+  async read(sessionID: string): Promise<Mission | null> {
+    return this.http.readMission(sessionID)
+  }
+
+  async snapshot(sessionID: string): Promise<{
+    mission: Mission | null
+    snapshot: import("./types.js").MissionSnapshot | null
+    budget: BudgetSnapshot | null
+  }> {
+    const mission = await this.read(sessionID)
+    if (!mission) return { mission: null, snapshot: null, budget: null }
+    const { missionToSnapshot, budgetToSnapshot } = await import("./utils/format.js")
+    return {
+      mission,
+      snapshot: missionToSnapshot(mission),
+      budget: budgetToSnapshot(mission),
+    }
+  }
+
+  // ── Create ─────────────────────────────────────────────────────────────
+
+  async create(
+    sessionID: string,
+    input: {
+      objective: string
+      completionCriterion: string
+      budget?: MissionBudgetLimits
+      actor?: MissionActor
+    },
+  ): Promise<Mission> {
+    const existing = await this.read(sessionID)
+    if (existing && existing.status === "active") {
+      throw new Error(`Cannot create: an active mission already exists: "${existing.objective}"`)
+    }
+    if (existing && existing.status === "paused") {
+      throw new Error(
+        `Cannot create: a paused mission exists. Use UpdateMission status="cancelled" to discard it first, or status="active" to resume it.`,
+      )
+    }
+    if (existing && existing.status === "blocked") {
+      throw new Error(
+        `Cannot create: a blocked mission exists. Use UpdateMission status="cancelled" to discard it first, or status="active" to resume it.`,
+      )
+    }
+
+    const limits = input.budget ?? {}
+    validateBudgetLimits(limits)
+
+    const now = Date.now()
+    const mission: Mission = {
+      id: `mission_${now}_${Math.random().toString(36).slice(2, 8)}`,
+      objective: input.objective.trim(),
+      completionCriterion: input.completionCriterion.trim(),
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      createdBy: input.actor ?? "model",
+      updatedBy: input.actor ?? "model",
+      continuationCount: 0,
+      budget: makeBudget(limits, now),
+    }
+    await this.http.writeMission(sessionID, mission)
+    return mission
+  }
+
+  // ── Update status ──────────────────────────────────────────────────────
+
+  async updateStatus(
+    sessionID: string,
+    target: UpdateMissionStatus,
+    actor: MissionActor,
+    reason?: string,
+  ): Promise<{ mission: Mission; stopped: boolean }> {
+    const mission = await this.read(sessionID)
+    if (!mission) {
+      throw new Error("No mission to update. Use CreateMission first.")
+    }
+
+    // cancelled is a special path: remove the record
+    if (target === "cancelled") {
+      await this.http.writeMission(sessionID, null)
+      return { mission: { ...mission, status: "complete" }, stopped: true }
+    }
+
+    assertTransition(mission.status, target)
+
+    const prevStatus = mission.status
+    mission.status = target
+    mission.updatedAt = Date.now()
+    mission.updatedBy = actor
+    mission.terminalReason = reason
+
+    if (target === "paused") {
+      // Freeze wall clock
+      mission.budget.wallClockPausedAt = Date.now()
+    } else if (target === "active" && prevStatus === "paused" && mission.budget.wallClockPausedAt) {
+      // Accumulate paused duration, reset start anchor
+      const paused = Date.now() - mission.budget.wallClockPausedAt
+      mission.budget.totalPausedMs += paused
+      mission.budget.wallClockPausedAt = undefined
+      mission.budget.wallClockStartedAt = Date.now()
+    } else if (target === "active" && prevStatus === "blocked") {
+      // blocked -> active re-activates, reset wall clock anchor
+      mission.budget.wallClockStartedAt = Date.now()
+    } else if (target === "active") {
+      // Other cases (e.g. first activation), set anchor if missing
+      mission.budget.wallClockStartedAt ??= Date.now()
+    }
+
+    // Clear terminalReason on resume
+    if (target === "active") {
+      mission.terminalReason = undefined
+    }
+
+    await this.http.writeMission(sessionID, mission)
+    return { mission, stopped: target !== "active" }
+  }
+
+  // ── Budget mutation ────────────────────────────────────────────────────
+
+  async setBudget(sessionID: string, limits: MissionBudgetLimits): Promise<{ mission: Mission; overBudget: boolean }> {
+    validateBudgetLimits(limits)
+    const mission = await this.read(sessionID)
+    if (!mission) throw new Error("No mission to set budget for. Use CreateMission first.")
+
+    const next: MissionBudget = {
+      turnLimit: limits.turnLimit ?? mission.budget.turnLimit,
+      tokenLimit: limits.tokenLimit ?? mission.budget.tokenLimit,
+      wallClockLimitMs: limits.wallClockLimitMs ?? mission.budget.wallClockLimitMs,
+      turnsUsed: mission.budget.turnsUsed,
+      tokensUsed: mission.budget.tokensUsed,
+      wallClockMs: mission.budget.wallClockMs,
+      wallClockStartedAt: mission.budget.wallClockStartedAt,
+      wallClockPausedAt: mission.budget.wallClockPausedAt,
+      totalPausedMs: mission.budget.totalPausedMs,
+    }
+
+    // Prevent setting a limit below current usage
+    if (next.turnLimit != null && next.turnsUsed >= next.turnLimit) {
+      throw new Error(`turnLimit (${next.turnLimit}) is <= turnsUsed (${next.turnsUsed})`)
+    }
+    if (next.tokenLimit != null && next.tokensUsed >= next.tokenLimit) {
+      throw new Error(`tokenLimit (${next.tokenLimit}) is <= tokensUsed (${next.tokensUsed})`)
+    }
+    if (next.wallClockLimitMs != null && next.wallClockMs >= next.wallClockLimitMs) {
+      throw new Error(`wallClockLimitMs (${next.wallClockLimitMs}) is <= wallClockMs (${next.wallClockMs})`)
+    }
+
+    mission.budget = next
+    mission.updatedAt = Date.now()
+    mission.updatedBy = "model"
+    await this.http.writeMission(sessionID, mission)
+    return { mission, overBudget: isOverBudget(mission) }
+  }
+
+  // ── Accumulation on continuation ───────────────────────────────────────
+
+  async recordContinuation(sessionID: string): Promise<Mission | null> {
+    const mission = await this.read(sessionID)
+    if (!mission || mission.status !== "active") return null
+    const now = Date.now()
+    mission.continuationCount += 1
+    mission.budget.turnsUsed = mission.continuationCount
+    mission.lastContinuationAt = now
+    mission.updatedAt = now
+    await this.http.writeMission(sessionID, mission)
+    return mission
+  }
+
+  async recordTokenUsage(sessionID: string, deltaTokens: number): Promise<Mission | null> {
+    if (deltaTokens <= 0) return null
+    const mission = await this.read(sessionID)
+    if (!mission) return null
+    mission.budget.tokensUsed += deltaTokens
+    mission.updatedAt = Date.now()
+    await this.http.writeMission(sessionID, mission)
+    return mission
+  }
+
+  async tickWallClock(sessionID: string): Promise<Mission | null> {
+    const mission = await this.read(sessionID)
+    if (!mission) return null
+    if (mission.status === "paused" || mission.budget.wallClockPausedAt) {
+      return mission
+    }
+    const start = mission.budget.wallClockStartedAt ?? mission.createdAt
+    const now = Date.now()
+    const elapsed = now - start - mission.budget.totalPausedMs
+    mission.budget.wallClockMs = Math.max(0, elapsed)
+    await this.http.writeMission(sessionID, mission)
+    return mission
+  }
+
+  async markBlocked(sessionID: string, reason: string): Promise<Mission | null> {
+    const mission = await this.read(sessionID)
+    if (!mission) return null
+    if (mission.status !== "active") return mission
+    mission.status = "blocked"
+    mission.terminalReason = reason
+    mission.updatedAt = Date.now()
+    mission.updatedBy = "runtime"
+    await this.http.writeMission(sessionID, mission)
+    return mission
+  }
+
+  async attachVerificationReport(sessionID: string, report: VerificationReport): Promise<Mission | null> {
+    const mission = await this.read(sessionID)
+    if (!mission) return null
+    mission.verificationReport = report
+    mission.updatedAt = Date.now()
+    mission.updatedBy = "system"
+    await this.http.writeMission(sessionID, mission)
+    return mission
+  }
+
+  async markComplete(sessionID: string, report?: VerificationReport): Promise<Mission | null> {
+    const mission = await this.read(sessionID)
+    if (!mission) return null
+    if (mission.status === "complete") return mission
+    if (mission.status !== "active" && mission.status !== "blocked") {
+      throw new Error(`Cannot mark complete from status: ${mission.status}`)
+    }
+    mission.status = "complete"
+    mission.terminalReason = "verified by mission-verify subagent"
+    mission.updatedAt = Date.now()
+    mission.updatedBy = "system"
+    if (report) mission.verificationReport = report
+    await this.http.writeMission(sessionID, mission)
+    return mission
+  }
+
+  // ── Continuation gate ──────────────────────────────────────────────────
+
+  async shouldContinue(sessionID: string, abortReason?: AbortReason): Promise<ContinuationDecision> {
+    const session = await this.http.getSession(sessionID)
+    if (!session) return { shouldContinue: false, reason: "no-mission" }
+    if (session.parentID) return { shouldContinue: false, reason: "is-subagent" }
+
+    const mission = await this.read(sessionID)
+    if (!mission) return { shouldContinue: false, reason: "no-mission" }
+    if (mission.status !== "active") return { shouldContinue: false, reason: "not-active" }
+
+    if (abortReason === "user") {
+      return { shouldContinue: false, reason: "aborted-user" }
+    }
+    if (abortReason === "runtime") {
+      return { shouldContinue: false, reason: "aborted-runtime" }
+    }
+
+    if (isOverBudget(mission)) {
+      return { shouldContinue: false, reason: "over-budget" }
+    }
+
+    if (mission.continuationCount > SOFT_TURN_CAP) {
+      return { shouldContinue: false, reason: "soft-cap" }
+    }
+
+    return { shouldContinue: true }
+  }
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+function makeBudget(limits: MissionBudgetLimits, now: number): MissionBudget {
+  return {
+    turnLimit: limits.turnLimit,
+    tokenLimit: limits.tokenLimit,
+    wallClockLimitMs: limits.wallClockLimitMs,
+    turnsUsed: 0,
+    tokensUsed: 0,
+    wallClockMs: 0,
+    wallClockStartedAt: now,
+    totalPausedMs: 0,
+  }
+}
+
+function validateBudgetLimits(limits: MissionBudgetLimits): void {
+  if (limits.turnLimit != null) {
+    if (limits.turnLimit < 1) {
+      throw new Error(`turnLimit must be >= 1, got ${limits.turnLimit}`)
+    }
+  }
+  if (limits.tokenLimit != null) {
+    if (limits.tokenLimit < 100) {
+      throw new Error(`tokenLimit must be >= 100, got ${limits.tokenLimit}`)
+    }
+  }
+  if (limits.wallClockLimitMs != null) {
+    if (limits.wallClockLimitMs < 1000) {
+      throw new Error(`wallClockLimitMs must be >= 1000 (1s), got ${limits.wallClockLimitMs}`)
+    }
+    if (limits.wallClockLimitMs > 24 * 60 * 60 * 1000) {
+      throw new Error(`wallClockLimitMs must be <= 86400000 (24h), got ${limits.wallClockLimitMs}`)
+    }
+  }
+}
+
+function assertTransition(from: MissionStatus, to: MissionStatus): void {
+  const allowed: Record<MissionStatus, MissionStatus[]> = {
+    active: ["paused", "blocked"],
+    paused: ["active"],
+    blocked: ["active"],
+    complete: [],
+  }
+  if (!allowed[from].includes(to)) {
+    throw new Error(`Invalid mission status transition: ${from} -> ${to}`)
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "name": "opencode-mission",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that enables autonomous mission-driven agent mode with 4-state machine, 3-dimension budget (turn/token/wallclock), structured 4-dimension verification, and interrupt-aware auto-pause.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --outfile ./dist/index.js --target node --format esm --external @opencode-ai/plugin --external @opencode-ai/plugin/tool --external @opencode-ai/sdk --external @opencode-ai/sdk/v2 --external zod --external effect",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "mission",
+    "autonomous",
+    "agent",
+    "budget",
+    "verification"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.9.2"
+  }
+}
