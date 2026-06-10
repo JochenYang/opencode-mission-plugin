@@ -170,8 +170,8 @@ export function createEventHook(deps: ContinuationHookDeps) {
     const fresh = await store.read(sessionID)
     if (!fresh) return
     if (isOverBudget(fresh)) {
-      debug(`over budget, marking blocked sessionID=${sessionID}`)
-      await store.markBlocked(sessionID, "Budget exhausted at end of turn")
+      debug(`over budget, marking budget_limited sessionID=${sessionID}`)
+      await store.markBudgetLimited(sessionID, "Budget exhausted at end of turn")
       return
     }
 

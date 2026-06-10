@@ -31,7 +31,12 @@ export function continuationPrompt(mission: Mission): string {
     b.wallClockLimitMs ? b.wallClockMs / b.wallClockLimitMs : 0,
   )
   if (over) {
-    budgetGuidance = "BUDGET EXHAUSTED: stop work and call UpdateMission status=\"blocked\" with a reason."
+    budgetGuidance = `BUDGET EXHAUSTED. Do NOT start any new substantive work for this goal.
+Wrap up THIS turn cleanly:
+  - Summarize useful progress made so far (what's done, with evidence)
+  - Identify remaining work or blockers
+  - Leave the user with a clear next step
+Then call UpdateMission status="blocked" with a concrete reason describing the budget dimension that ran out.`
   } else if (maxPct >= 0.75) {
     budgetGuidance = "Budget tight (>=75% used): converge on the objective. Avoid starting new discretionary work."
   } else if (maxPct >= 0.5) {

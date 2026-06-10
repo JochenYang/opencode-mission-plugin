@@ -96,6 +96,7 @@ export class MissionStore {
       updatedBy: input.actor ?? "model",
       continuationCount: 0,
       budget: makeBudget(limits, now),
+      consecutiveBlockAttempts: 0,
     }
     await this.http.writeMission(sessionID, mission)
     return mission
@@ -118,6 +119,32 @@ export class MissionStore {
     if (target === "cancelled") {
       await this.http.writeMission(sessionID, null)
       return { mission: { ...mission, status: "complete" }, stopped: true }
+    }
+
+    // P0 #3: 3-turn threshold for agent-declared blocked.
+    // Code-authored attempts (actor="model") need 3 consecutive same-reason
+    // attempts before they actually transition. Runtime/user/system still
+    // block immediately.
+    if (target === "blocked" && actor === "model") {
+      const sameReason = mission.lastBlockReason === reason
+      mission.consecutiveBlockAttempts = sameReason
+        ? (mission.consecutiveBlockAttempts ?? 0) + 1
+        : 1
+      mission.lastBlockReason = reason
+      mission.updatedAt = Date.now()
+      mission.updatedBy = actor
+      if (mission.consecutiveBlockAttempts < 3) {
+        await this.http.writeMission(sessionID, mission)
+        throw new Error(
+          `Block threshold not met: this is attempt ${mission.consecutiveBlockAttempts}/3 ` +
+            `for the same reason. The mission stays active. Re-attempt ` +
+            `UpdateMission status="blocked" with the same reason for ` +
+            `${3 - mission.consecutiveBlockAttempts} more turn(s) to actually ` +
+            `mark it as blocked. This is intentional: prevents premature ` +
+            `block declarations on transient issues.`,
+        )
+      }
+      // Threshold met — fall through to the normal transition path.
     }
 
     assertTransition(mission.status, target)
@@ -148,6 +175,9 @@ export class MissionStore {
     // Clear terminalReason on resume
     if (target === "active") {
       mission.terminalReason = undefined
+      // Reset block threshold counter on resume so a fresh cycle starts clean.
+      mission.consecutiveBlockAttempts = 0
+      mission.lastBlockReason = undefined
     }
 
     await this.http.writeMission(sessionID, mission)
@@ -234,6 +264,23 @@ export class MissionStore {
     if (!mission) return null
     if (mission.status !== "active") return mission
     mission.status = "blocked"
+    mission.terminalReason = reason
+    mission.updatedAt = Date.now()
+    mission.updatedBy = "runtime"
+    await this.http.writeMission(sessionID, mission)
+    return mission
+  }
+
+  // P0 #4: separate state for budget-exhaustion (vs agent-declared blocked).
+  // Both are recoverable via UpdateMission status="active", but the status
+  // name communicates the cause. Resuming from budget_limited requires the
+  // owner to either set a higher budget or accept that continuation will
+  // re-block on the next turn once the same budget hits 100% again.
+  async markBudgetLimited(sessionID: string, reason: string): Promise<Mission | null> {
+    const mission = await this.read(sessionID)
+    if (!mission) return null
+    if (mission.status !== "active") return mission
+    mission.status = "budget_limited"
     mission.terminalReason = reason
     mission.updatedAt = Date.now()
     mission.updatedBy = "runtime"
@@ -335,9 +382,10 @@ function validateBudgetLimits(limits: MissionBudgetLimits): void {
 
 function assertTransition(from: MissionStatus, to: MissionStatus): void {
   const allowed: Record<MissionStatus, MissionStatus[]> = {
-    active: ["paused", "blocked"],
+    active: ["paused", "blocked", "budget_limited"],
     paused: ["active"],
     blocked: ["active"],
+    budget_limited: ["active"],
     complete: [],
   }
   if (!allowed[from].includes(to)) {

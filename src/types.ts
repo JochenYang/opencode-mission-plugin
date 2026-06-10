@@ -12,13 +12,20 @@
 
 // ── Status / Actor ──────────────────────────────────────────────────────────
 
-export type MissionStatus = "active" | "paused" | "blocked" | "complete"
+export type MissionStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "budget_limited"
+  | "complete"
 
 export type MissionActor = "user" | "model" | "runtime" | "system"
 
 // UpdateMission's externally exposed status parameter set.
 // Note: "cancelled" is a tool parameter value that triggers record deletion;
-// it is NOT written to the status field.
+// it is NOT written to the status field. "budget_limited" is set automatically
+// by the runtime when budget exhausts; external callers transition out of it
+// via "active" but cannot set it directly.
 export type UpdateMissionStatus = "active" | "paused" | "blocked" | "cancelled"
 
 // ── Budget ──────────────────────────────────────────────────────────────────
@@ -112,6 +119,10 @@ export interface Mission {
 
   // Termination info
   terminalReason?: string
+
+  // 3-turn blocked threshold (P0 #3, inspired by Codex)
+  consecutiveBlockAttempts: number
+  lastBlockReason?: string
 
   // Verification
   verificationReport?: VerificationReport

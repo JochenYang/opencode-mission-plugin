@@ -86,6 +86,15 @@ export function formatMissionStatus(mission: Mission): string {
   if (mission.terminalReason) {
     lines.push(`Reason: ${mission.terminalReason}`)
   }
+  if (
+    mission.status === "active" &&
+    mission.consecutiveBlockAttempts &&
+    mission.consecutiveBlockAttempts > 0
+  ) {
+    lines.push(
+      `Block attempts: ${mission.consecutiveBlockAttempts}/3 (same reason, threshold not met)`,
+    )
+  }
   lines.push("")
   lines.push("Completion criterion:")
   lines.push(`  ${mission.completionCriterion}`)
