@@ -71,21 +71,13 @@ export function createEventHook(deps: ContinuationHookDeps) {
       if (info?.role === "user") {
         userAborted.delete(sessionID)
         runtimeErrored.delete(sessionID)
-        // Reset mission counters on a new user message (new autonomous cycle)
-        const mission = await store.read(sessionID)
-        if (mission) {
-          mission.continuationCount = 0
-          mission.budget.turnsUsed = 0
-          mission.budget.tokensUsed = 0
-          mission.budget.wallClockMs = 0
-          mission.budget.wallClockStartedAt = Date.now()
-          mission.budget.totalPausedMs = 0
-          mission.budget.wallClockPausedAt = undefined
-          mission.lastContinuationAt = undefined
-          await http.writeMission(sessionID, mission)
-        }
+        // Counters (continuationCount, turnsUsed, tokensUsed, wallClockMs) are
+        // mission-lifetime and must NOT be reset on every user message —
+        // otherwise /mission status mid-mission reports 0/0 even after many
+        // continuations. New-mission initialization happens in
+        // MissionStore.create() (see makeBudget), not here.
         lastTokens.delete(sessionID)
-        debug(`user message: reset mission counters sessionID=${sessionID}`)
+        debug(`user message: cleared interrupt flags + token cache sessionID=${sessionID}`)
         return
       }
       // Assistant message: accumulate tokens
