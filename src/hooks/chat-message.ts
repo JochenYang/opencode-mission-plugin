@@ -42,7 +42,11 @@ export function createChatMessageHook(deps: ChatMessageHookDeps): Pick<Hooks, "c
       // Inject mission context into the user message
       for (const part of output.parts) {
         if ((part as any).type === "text" && (part as any).text) {
-          ;(part as any).text = subagentMissionContext(mission, (part as any).text)
+          ;(part as any).text = subagentMissionContext(
+            mission,
+            (part as any).text,
+            session.parentID,
+          )
         }
       }
       debug(`injected mission context into verify subagent sessionID=${input.sessionID}`)

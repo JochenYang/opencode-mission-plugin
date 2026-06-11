@@ -5,7 +5,11 @@
 import type { Mission } from "../types.js"
 import { formatDuration, formatNumber } from "../utils/format.js"
 
-export function subagentMissionContext(mission: Mission, originalPrompt: string): string {
+export function subagentMissionContext(
+  mission: Mission,
+  originalPrompt: string,
+  parentSessionID: string,
+): string {
   const b = mission.budget
   const turnLine = b.turnLimit ? `${mission.continuationCount}/${b.turnLimit}` : `${mission.continuationCount}/∞`
   const tokenLine = b.tokenLimit ? `${formatNumber(b.tokensUsed)}/${formatNumber(b.tokenLimit)}` : `${formatNumber(b.tokensUsed)}/∞`
@@ -15,6 +19,10 @@ export function subagentMissionContext(mission: Mission, originalPrompt: string)
     : "First verification"
 
   return `<mission_context>
+<session_id>
+${parentSessionID}
+</session_id>
+
 <objective>
 ${mission.objective}
 </objective>
@@ -37,3 +45,4 @@ Supplementary guidance from the main agent. Treat as secondary to the objective 
 ${originalPrompt}
 </extra_context>`
 }
+

@@ -63,15 +63,31 @@ If any dimension is < 3, or completeness < 3, verdict MUST be "failed".
 
 ## Completion Flow
 
+**Do not rely on the system to detect your JSON report.** The opencode
+\`experimental.text.complete\` plugin hook has a known cleanup-path bug
+that can swallow the auto-complete on interrupted/aborted streams, leaving
+missions stuck in ACTIVE forever. The reliable path is for you to call the
+\`UpdateMission\` tool yourself. The mission is keyed on the parent session's
+sessionID — your sub-agent sessionID is different and is NOT what the tool
+should target.
+
+The \`<mission_context>\` block above contains a \`<session_id>\` element with
+the parent session ID. Pass that value as the \`missionSessionID\` argument
+when you call the tool. If the \`<session_id>\` is somehow missing, fail
+loudly with a clear error rather than guessing.
+
 When your verdict is "passed":
 1. Output the JSON block (verdict="passed")
 2. Output a short summary like "VERIFICATION PASSED — all dimensions >= 3"
-3. End your turn. The system will detect the JSON report and mark the mission as complete in the parent session.
+3. Call \`UpdateMission\` with \`status="complete"\` and \`missionSessionID="<session_id from context>"\`
+4. End your turn. The mission is now complete.
 
 When your verdict is "failed":
 1. Output the JSON block (verdict="failed")
 2. List the specific gaps the main agent needs to fix
-3. End your turn. The main session will resume work.
+3. Call \`UpdateMission\` with \`status="blocked"\`, a short \`reason\` (one sentence
+   summarizing the main gap), and \`missionSessionID="<session_id from context>"\`
+4. End your turn. The main session will resume from this blocked state to fix the issues.
 
 ## Verification Principles
 
