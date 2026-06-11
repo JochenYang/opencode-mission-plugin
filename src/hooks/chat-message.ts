@@ -23,7 +23,7 @@ export function createChatMessageHook(deps: ChatMessageHookDeps): Pick<Hooks, "c
 
   function debug(msg: string) {
     if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-      log?.(`[mission-pro] ${msg}`)
+      log?.(`[mission] ${msg}`)
     }
   }
 
@@ -62,24 +62,67 @@ export function createChatMessageHook(deps: ChatMessageHookDeps): Pick<Hooks, "c
       if (!text || !text.includes("verdict")) return
 
       const report = tryParseVerifyJson(text)
-      if (!report) return
+      const parentID = session.parentID
+
+      if (!report) {
+        // Fail-open: the judge failed to produce parseable output. Without
+        // this fallback, a persistent parse failure traps the user in
+        // mission mode forever (continuation keeps firing, mission never
+        // completes). Attach a synthetic "judgeFailed" report and mark
+        // complete so the user can move on; the report flags the gap so
+        // it's visible in the mission history.
+        const failOpen: VerificationReport = {
+          verifiedAt: Date.now(),
+          verdict: "failed",
+          judgeFailed: true,
+          reason: "verify subagent output was not a parseable JSON report",
+          scores: emptyScores("judge produced no parseable output"),
+        }
+        await store.attachVerificationReport(parentID, failOpen)
+        await store.markComplete(parentID, failOpen)
+        debug(`judge failed to produce parseable output; failing open sessionID=${parentID}`)
+        return
+      }
 
       debug(`parsed verify report verdict=${report.verdict} sessionID=${input.sessionID}`)
 
       // Attach report to the parent session's mission
-      await store.attachVerificationReport(session.parentID, report)
+      await store.attachVerificationReport(parentID, report)
 
       if (report.verdict === "passed") {
         // Passed: automatically mark complete
-        await store.markComplete(session.parentID, report)
+        await store.markComplete(parentID, report)
         debug(`mission marked complete via verify sessionID=${input.sessionID}`)
+        return
       }
-      // failed: do nothing; the main session will see the report and continue.
+
+      // Failed: increment judge react counter; cap at MAX_JUDGE_REACT
+      // to prevent infinite verify loops when the judge keeps rejecting
+      // without the agent making progress.
+      const { capped } = await store.recordJudgeReactAttempt(parentID)
+      if (capped) {
+        debug(
+          `judge react cap reached; mission auto-budget_limited sessionID=${parentID}`,
+        )
+      }
     },
   }
 }
 
 const JSON_BLOCK_RE = /```(?:json)?\s*(\{[\s\S]*?"verdict"[\s\S]*?\})\s*```/
+
+function emptyScores(evidence: string): VerificationReport["scores"] {
+  const dim = (): VerificationReport["scores"][keyof VerificationReport["scores"]] => ({
+    score: 0,
+    evidence,
+  })
+  return {
+    completeness: dim(),
+    correctness: dim(),
+    integration: dim(),
+    robustness: dim(),
+  }
+}
 
 export function tryParseVerifyJson(text: string): VerificationReport | null {
   const match = text.match(JSON_BLOCK_RE)

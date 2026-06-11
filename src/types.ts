@@ -94,6 +94,12 @@ export interface VerificationReport {
   scores: VerificationScores
   gaps?: string[]
   evidence?: string[]
+  // Set when the judge itself failed (e.g. parse error, timeout) and we
+  // fell back to a default verdict. Scores are zeroed in that case.
+  judgeFailed?: boolean
+  // Free-form explanation when judgeFailed=true; otherwise the human-readable
+  // reason from the judge.
+  reason?: string
 }
 
 // ── Mission ─────────────────────────────────────────────────────────────────
@@ -120,9 +126,13 @@ export interface Mission {
   // Termination info
   terminalReason?: string
 
-  // 3-turn blocked threshold (P0 #3, inspired by Codex)
+  // 3-turn blocked threshold for agent-declared blocks
   consecutiveBlockAttempts: number
   lastBlockReason?: string
+
+  // Number of times the judge (verifier) returned a non-satisfying verdict
+  // without making progress. Bounded to avoid infinite verify loops.
+  judgeReactAttempts: number
 
   // Verification
   verificationReport?: VerificationReport
@@ -139,13 +149,6 @@ export interface MissionSnapshot {
   terminalReason?: string
   budget: BudgetSnapshot
   hasVerificationReport: boolean
-}
-
-// ── Session metadata storage schema ─────────────────────────────────────────
-
-// Session.metadata is Record<string, unknown>; we use "missionPro" as our key.
-export interface SessionMetadataShape {
-  missionPro?: Mission
 }
 
 // ── Interrupt tracking ─────────────────────────────────────────────────────

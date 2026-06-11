@@ -18,7 +18,7 @@ export function createSystemTransformHook(
 
   function debug(msg: string) {
     if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-      log?.(`[mission-pro] ${msg}`)
+      log?.(`[mission] ${msg}`)
     }
   }
 

@@ -28,12 +28,17 @@ import { VERIFY_AGENT_PROMPT } from "./verify/verify-prompt.js"
 
 const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
   // Client initialization.
-  // The plugin runtime injects a V1 HeyApi client (input.client._client) whose
-  // patch/get already carry baseUrl, headers, fetch, and auth.
+  // The plugin runtime injects a V2 SDK client (input.client). We use its
+  // session.get() for parent-session lookups (for sub-agent routing) and
+  // its fetch + headers via getConfig() when constructing a sibling client
+  // for promptAsync. Mission state itself lives in a local JSON file
+  // (see session-http.ts) so we do not depend on the session metadata
+  // endpoint, which was removed in 1.17.x.
   const v1Client = extractV1Client(input.client)
-  const http = createSessionHttp({ v1Client, baseUrl: input.serverUrl.origin })
+  const http = createSessionHttp({ v2Client: input.client, directory: input.directory })
 
-  // V2 client is only used for promptAsync (V2 SDK exposes it).
+  // A second V2 client instance for promptAsync; the SDK's promptAsync lives
+  // on its session namespace and uses the same transport.
   const v2Client = createOpencodeClient({
     baseUrl: input.serverUrl.origin,
     headers: v1Client?.getConfig?.()?.headers,

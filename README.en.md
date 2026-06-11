@@ -6,14 +6,16 @@ An OpenCode plugin that adds an autonomous mission-driven agent mode: the user s
 
 | Feature                        | Description                                                              |
 | ------------------------------ | ------------------------------------------------------------------------ |
-| **4-state machine**            | `active / paused / blocked / complete` (distinguishes user vs system stops) |
-| **3-dimension budget**         | `turn / token / wallclock`, independently configurable, auto-`blocked` on exceed |
+| **5-state machine**            | `active / paused / blocked / budget_limited / complete` (distinguishes user stop, system stop, system limit) |
+| **3-dimension budget**         | `turn / token / wallclock`, independently configurable, auto-`budget_limited` on exceed |
+| **3-turn block threshold**     | Agent-declared blocked requires 3 consecutive same-reason attempts (prevents premature declarations) |
+| **judge react cap**            | 5 failed verdicts in a row auto-transitions to `budget_limited` (prevents infinite verify loops) |
 | **4 standalone tools**         | `CreateMission` / `UpdateMission` / `GetMission` / `SetMissionBudget`         |
 | **Independent verify subagent** | 4-dimension scoring (completeness/correctness/integration/robustness) → auto mark complete |
-| **3-level system prompt**      | Active / blocked / paused each get their own system-level guidance              |
+| **Status-adaptive system prompt** | `<mission_status>` block + dynamic commands + 3-turn reminder + wrap-up directive |
 | **Self-audit**                 | Every turn's continuation prompt + system prompt force a 4-dim self-check       |
 | **Interrupt semantics**        | User Esc → `paused` (wallclock frozen) / runtime error → `blocked`              |
-| **Session-scoped storage**     | `Session.metadata.missionPro` (namespaced, persists across restarts)              |
+| **Self-managed JSON storage**  | `~/.config/opencode/missions/<workspace>/<sessionID>.json`, cross-platform (Windows / macOS / Linux), per-project isolation |
 
 ## Installation
 
@@ -153,7 +155,8 @@ Then in the TUI prompt:
 
 - **Continuation + interrupt tracking depends on `EventSessionIdle`**: works in interactive TUI; `opencode run` (headless) does not emit this event.
 - **Verify JSON parsing** depends on the subagent emitting a strict `\`\`\`json { verdict, scores } \`\`\`` block.
-- **Storage** goes through the V1 HeyApi client with a metadata cast (V1 SDK type doesn't expose `metadata`, server 1.16.x supports it).
+- **Storage** is self-managed JSON files at `~/.config/opencode/missions/<workspace>/<sessionID>.json`, with atomic writes (temp + rename). Per-project isolation via sanitized workspace slugs.
+- **Sub-agent routing** uses `globalThis.fetch` to call `/api/session/{id}`. On opencode 1.17.x the plugin process may be sandboxed away from the server; the fallback returns `null` which is safe for the main flow (sub-agent routing becomes a known limitation).
 
 ## Development
 

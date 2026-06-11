@@ -36,7 +36,7 @@ You have FOUR mission tools available. Call them by these exact names:
 ## Rules
 
 1. /mission is the ONLY entry point for mission mode. Do NOT do the work directly without first calling \`CreateMission\`.
-2. Your **first tool call** in response to a CREATE request must be \`CreateMission\`. Do NOT skip ahead to bash/write/read — call \`CreateMission\` first to record the mission in session metadata, otherwise the rest of the plugin (continuation, self-audit, budget tracking, mission-verify) will not work.
+2. Your **first tool call** in response to a CREATE request must be \`CreateMission\`. Do NOT skip ahead to bash/write/read — call \`CreateMission\` first to record the mission in plugin storage, otherwise the rest of the plugin (continuation, self-audit, budget tracking, mission-verify) will not work.
 3. For CREATE: you must specify BOTH objective AND completion_criterion.
    If the user only provided objective (via /mission <text>), INFER a reasonable completion_criterion
    and state it explicitly in your response. If the user's intent is unclear, ask for clarification

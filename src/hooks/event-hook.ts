@@ -36,7 +36,7 @@ export function createEventHook(deps: ContinuationHookDeps) {
 
   function debug(msg: string) {
     if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-      log?.(`[mission-pro] ${msg}`)
+      log?.(`[mission] ${msg}`)
     }
   }
 
@@ -127,17 +127,19 @@ export function createEventHook(deps: ContinuationHookDeps) {
     userAborted: Set<string>,
     runtimeErrored: Set<string>,
   ) {
-    // 1. Fetch session metadata; skip subagent sessions
+    // 1. Read mission first; skip the network call entirely when no mission exists
+    //    (the plugin is globally registered, so this fires for every opencode session;
+    //    only active missions need sub-agent routing lookups)
+    const mission = await store.read(sessionID)
+    if (!mission) return
+
+    // 2. Resolve parent session via http.getSession; skip subagent sessions
     const session = await http.getSession(sessionID)
     if (!session) return
     if (session.parentID) {
       debug(`subagent session, skip sessionID=${sessionID}`)
       return
     }
-
-    // 2. Read mission
-    const mission = await store.read(sessionID)
-    if (!mission) return
 
     // 3. Distinguish abort reason
     let abortReason: AbortReason | undefined

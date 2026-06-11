@@ -5,7 +5,7 @@
 // agent can rely on, plus a dynamic `Commands:` list scoped to the current
 // status (e.g., active cannot "resume", paused cannot "pause"). The active
 // state additionally includes the 3-turn block-threshold reminder and the
-// budget wrap-up directive (P0 #1, #2, #3 inspired by Codex goal mode).
+// budget wrap-up directive.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { Mission } from "./types.js"

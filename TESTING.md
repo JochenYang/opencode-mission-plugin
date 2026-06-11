@@ -71,7 +71,7 @@ opencode
 - [ ] agent 第一个工具调用还是 `CreateMission`
 - [ ] 创建文件时**不被权限弹窗卡住**（bash 协议起作用）
 - [ ] budget 接近上限时 agent 收到 "Budget tight" 提示
-- [ ] 如果 budget 耗尽，agent 调 `UpdateMission status="blocked"`
+- [ ] 如果 budget 耗尽，mission 自动转 `budget_limited`（agent 调 `UpdateMission status="blocked"` 走 wrap-up 指令）
 - [ ] mission 跑完后 `GetMission` 返回 "No active mission"
 
 ## 5. 测试 3: 中断（按 Esc）
@@ -93,7 +93,7 @@ opencode
 **观察项**：
 
 - [ ] mission 跨多个 turn 续跑（continuationCount > 1）
-- [ ] 每 turn 续跑 prompt 里看到 `<progress>Turn N/M (X% used)</progress>`
+- [ ] 每 turn 续跑 prompt 里看到 `<progress>` 块带 turn / token / wallclock 进度
 - [ ] system prompt 注入里有 "Self-audit before declaring done"
 - [ ] agent 主动 `mkdir -p` 创建子目录
 - [ ] 测试 / build / tsc 都跑通
@@ -109,6 +109,7 @@ opencode
 
 - ❌ **headless `opencode run` 模式下续跑不触发** — plugin event hook 收不到 `session.idle`（opencode 设计限制）。只在 TUI 实测能验证续跑
 - ❌ **没有 UI 进度面板** — 状态变化只在 `GetMission` 输出里可见
+- ⚠️ **sub-agent 路由在 1.17.x 可能失败** — `getSession` 用 `globalThis.fetch` 调 `/api/session/{id}`，plugin 进程可能被沙箱隔离。这种情况下 mission-verify 子智能体拿不到 parent 上下文（fail-open 兜底仍能让 mission 完成）
 
 ## 9. 调试开关
 

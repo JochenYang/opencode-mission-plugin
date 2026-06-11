@@ -6,50 +6,65 @@
 
 | Aspect                 | Design                                                              |
 | ---------------------- | ------------------------------------------------------------------- |
-| State machine          | `active / paused / blocked / complete` (4 states)                   |
+| State machine          | `active / paused / blocked / budget_limited / complete` (5 states)  |
 | Budget                 | turn / token / wallclock (3 dimensions, independently configurable) |
 | Tools                  | 4 standalone tools                                                 |
 | Continuation trigger   | `EventSessionIdle` (primary), `EventSessionError` (interrupt)      |
-| Prompt injection       | 3-level system injection (active / blocked / paused)               |
+| Prompt injection       | 4 状态自适应 system 注入 + 动态命令列表 + wrap-up 指令            |
 | Interrupt semantics    | user Esc -> `paused` (wallclock frozen), runtime error -> `blocked` |
-| Verification           | 4-dimension structured scoring + JSON report                       |
-| Storage                | `Session.metadata.missionPro` (namespaced, V1 HeyApi client)      |
+| Verification           | 4-dimension structured scoring + JSON report (with fail-open)       |
+| Storage                | Self-managed JSON file at `~/.config/opencode/missions/<workspace>/<sessionID>.json` |
 
 ## 2. State machine
 
 ```
-                +----------+
-   create ----> |  active  | <---- resume (from paused/blocked)
-                +----+-----+
-                     |
-        +------------+------------+----------------+
-        v            v            v                v
-   +---------+  +----------+  +----------+    (cleared)
-   | paused  |  | blocked  |  | complete |     cancel
-   +---------+  +----------+  +----------+
-   user Esc    budget/error   verify passed
+                +----------------+
+   create ----> |     active     | <---- resume (from paused/blocked/budget_limited)
+                +-------+--------+
+                        |
+        +---------------+---------------+-----------------+
+        v               v               v                 v
+   +---------+    +-------------+   +----------+    (cleared)
+   | paused  |    |  blocked    |   | complete |     cancel
+   +---------+    +-------------+   +----------+
+   user Esc       3-turn model      verify passed
+                 threshold (or
+                 runtime error)
+
+                +------------------+
+       +------> | budget_limited    | <----+ (also reachable from active)
+       |        +---------+--------+      |
+       |                  |               |
+       +---- resume ------+               +-- budget exhausted
+                          |                  OR judge react cap
+                          +-- cancel
 ```
 
-| from \\ to          | active | paused | blocked | complete | (cleared) |
-| ------------------- | ------ | ------ | ------- | -------- | --------- |
-| (none)              | create | -      | -       | -        | -         |
-| active              | -      | user   | runtime | verify   | cancel    |
-| paused              | resume | -      | -       | -        | cancel    |
-| blocked             | resume | -      | -       | -        | cancel    |
-| complete            | -      | -      | -       | -        | cancel    |
+| from \\ to          | active | paused | blocked | budget_limited | complete | (cleared) |
+| ------------------- | ------ | ------ | ------- | --------------- | -------- | --------- |
+| (none)              | create | -      | -       | -               | -        | -         |
+| active              | -      | user   | 3rd attempt | budget/judge | verify   | cancel    |
+| paused              | resume | -      | -       | -               | -        | cancel    |
+| blocked             | resume | -      | -       | -               | -        | cancel    |
+| budget_limited      | resume | -      | -       | -               | -        | cancel    |
+| complete            | -      | -      | -       | -               | -        | cancel    |
+
+**3-turn blocked threshold**: `actor="model"` must request `blocked` with the same reason 3 times consecutively. Below the threshold, the attempt is recorded but the mission stays `active`. Resets on resume.
+
+**budget_limited vs blocked**: `blocked` is agent-declared (after 3 attempts); `budget_limited` is system-declared (budget exhausted or judge react cap reached). Both are recoverable via `UpdateMission status="active"`.
 
 Implementation: `src/mission-store.ts:assertTransition`.
 
 ## 3. Data model
 
-State lives in `Session.metadata.missionPro` (JSON column, auto-serialized):
+State lives in a JSON file at `~/.config/opencode/missions/<workspace-slug>/<sessionID>.json` (auto-managed by the plugin, not by opencode server metadata):
 
 ```ts
 interface Mission {
   id: string
   objective: string
   completionCriterion: string
-  status: MissionStatus
+  status: MissionStatus  // 5 values: active | paused | blocked | budget_limited | complete
   createdAt: number
   updatedAt: number
   createdBy: MissionActor
@@ -58,6 +73,9 @@ interface Mission {
   lastContinuationAt?: number
   budget: MissionBudget
   terminalReason?: string
+  consecutiveBlockAttempts: number  // P0: 3-turn threshold
+  lastBlockReason?: string
+  judgeReactAttempts: number          // P0: judge react cap
   verificationReport?: VerificationReport
 }
 
@@ -78,21 +96,26 @@ Full schema in `src/types.ts`.
 
 ## 4. Persistence layer
 
-Mission reads/writes go through `src/utils/session-http.ts`, which uses the **V1 HeyApi client** injected by the plugin runtime:
+The plugin owns its own state. Mission reads/writes go through `src/utils/session-http.ts` which uses the file system, not the opencode server.
 
 ```ts
-const v1Client = (input.client as any)._client
-await v1Client.get({ url: `${baseUrl}/session/${sessionID}` })
-await v1Client.patch({ url: `${baseUrl}/session/${sessionID}`, body: { metadata } })
+const STORAGE_DIR = join(homedir(), ".config", "opencode", "missions")
+
+function missionPath(directory: string, sessionID: string): string {
+  return join(STORAGE_DIR, projectSlug(directory), `${sessionID}.json`)
+}
+
+await writeFile(`${path}.tmp`, JSON.stringify(mission, null, 2))
+await rename(`${path}.tmp`, path)  // atomic
 ```
 
-Why V1 client (not bare `fetch`):
+Why we moved off the opencode server API (1.17.x removed PATCH for arbitrary session metadata):
 
-- V1 client wraps fetch with proper baseUrl, auth headers, and response parsing.
-- The SDK 1.4.8 type definition for `SessionUpdateData.body` does not declare `metadata`, but the opencode 1.16.x server accepts it. We pass it through the client; the V1 wrapper handles the response cleanly.
-- Reusing the runtime-injected client keeps cookies and auth consistent with other opencode tools.
+- 1.16.x had `PATCH /session/{id}` with `body: { metadata: { missionPro: ... } }`. 1.17.x dropped this endpoint entirely (the session table only has typed columns; `metadata` is now a typed JSON column, not freely writable).
+- The V2 SDK's `client.session.get()` has a path-template substitution bug in 1.17.1 (sends literal `{id}` to the server, which 500s).
+- The V1 client's fetch wrapper has its own response-parsing bug (`v[0]` undefined) on raw calls.
 
-Storage key: `Session.metadata.missionPro` (namespaced to coexist with other mission plugins).
+Path construction is cross-platform via `os.homedir() + path.join()`. Workspace is sanitized from `PluginInput.directory`. Storage key is `<workspace-slug>/<sessionID>.json`, namespaced per project.
 
 ## 5. Tools
 
@@ -230,7 +253,7 @@ opencode-mission/
 │   │   ├── verify-prompt.ts           # Subagent system prompt
 │   │   └── verify-context.ts          # Subagent context template
 │   └── utils/
-│       ├── session-http.ts            # V1 client wrapper for Session.metadata
+│       ├── session-http.ts            # File-based mission storage + raw fetch for sub-agent routing
 │       └── format.ts                  # Formatting helpers
 ├── dist/
 │   └── index.js                       # Built single-file bundle (~56 KB)
@@ -257,21 +280,23 @@ cp dist/index.js ~/.config/opencode/plugins/opencode-mission.js
 }
 ```
 
-The plugin ships as a single JS file (~56 KB) with no external runtime dependencies in the same directory — `bun build` inlines internal modules and keeps `@opencode-ai/plugin`, `@opencode-ai/sdk`, `zod`, and `effect` as external imports resolved by the opencode runtime.
+The plugin ships as a single JS file (~64 KB) with no external runtime dependencies in the same directory — `bun build` inlines internal modules and keeps `@opencode-ai/plugin`, `@opencode-ai/sdk`, `zod`, and `effect` as external imports resolved by the opencode runtime.
 
 ## 14. Known limitations
 
 - **Continuation + interrupt tracking depend on `EventSessionIdle`**: works in interactive TUI; `opencode run` (headless) does not emit this event so the mechanism is structurally correct but unvalidated in headless tests.
-- **Verify JSON parsing** depends on the subagent emitting a strict `\`\`\`json { verdict, scores } \`\`\`` block. A future version could have the subagent emit via a structured tool.
+- **Verify JSON parsing** depends on the subagent emitting a strict `\`\`\`json { verdict, scores } \`\`\`` block. Fail-open (a synthetic `judgeFailed: true` report) catches parse failures and marks complete to avoid trapping the user. A future version could replace the free-text parser with a structured tool emit.
 - **Wallclock precision** relies on `Date.now()`; subject to system clock adjustments.
-- **Single mission per session**: the metadata schema allows extension to a `missionsPro: Mission[]` array for parallel missions; not implemented in v1.
-- **Storage SDK mismatch**: V1 SDK 1.4.8 type definition for `SessionUpdateData.body` does not declare `metadata`; the opencode 1.16.x server accepts it. We rely on V1 client wrapper accepting the extra field.
+- **Single mission per session**: the JSON file schema allows extension to a `missions: Mission[]` array for parallel missions; not implemented in v1.
+- **Sub-agent routing on opencode 1.17.x**: `getSession` uses raw `fetch` to `/api/session/{id}` (the canonical 1.17.x path; the V2 SDK's `session.get()` has a path-template substitution bug in 1.17.1, sending literal `{id}` to the server). On 1.17.x the plugin process may be sandboxed away from the server, in which case `getSession` returns null and the main flow continues safely.
+- **HTML response guard** rejects SPA fallback bodies. If opencode ever routes `/session/{id}` style calls to a non-SPA endpoint, the guard still works because the response will be valid JSON.
 
 ## 15. Future work (v2+)
 
-- Multi-mission parallel execution (extend metadata schema to `missionsPro: Mission[]`).
+- Multi-mission parallel execution (extend the JSON file schema to a `missions: Mission[]` array per session).
 - Budget pool (multiple missions sharing a token budget).
 - Verify report visualization (custom TUI panel).
 - Status change notifications via `EventTuiToastShow`.
 - `/mission history` command.
+- Side-channel parentID propagation for mission-verify (so it works even when `getSession` cannot reach the opencode server).
 - Structured emit (tool instead of free text) for verify report to remove JSON-parsing fragility.

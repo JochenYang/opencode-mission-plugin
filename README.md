@@ -6,14 +6,16 @@
 
 | 特性                | 说明                                                                |
 | ------------------- | ------------------------------------------------------------------- |
-| **4 态状态机**       | `active / paused / blocked / complete`，区分用户主动与系统级停止         |
-| **3 维度预算**       | `turn / token / wallclock`，可独立设上限，超限自动 `blocked`              |
+| **5 态状态机**       | `active / paused / blocked / budget_limited / complete`，区分用户主动 / 系统限制 / 自主阻塞 |
+| **3 维度预算**       | `turn / token / wallclock`，可独立设上限；超限自动转 `budget_limited` 而非 `blocked` |
+| **3-turn block 阈值** | agent 自主声明 blocked 需连续 3 次同因（防误判）                            |
+| **judge react cap**  | 验证连续 5 次失败自动 budget_limited（防 verify 死循环）                       |
 | **4 个独立工具**     | `CreateMission` / `UpdateMission` / `GetMission` / `SetMissionBudget` |
 | **独立 verify 子智能体** | 4 维评分（completeness/correctness/integration/robustness） → 自动 mark complete |
-| **3 级 system prompt** | active / blocked / paused 三种状态都有引导注入                            |
+| **状态自适应 system prompt** | `<mission_status>` 块 + 动态命令列表 + 3-turn 提醒 + wrap-up 指令          |
 | **自我批判**         | 每 turn 续跑 prompt + system 都强制 4 维自检                              |
 | **中断语义**         | 用户 Esc → `paused`（冻结 wallclock）/ runtime error → `blocked`           |
-| **会话级存储**       | `Session.metadata.missionPro`（命名空间化，跨重启保留）                     |
+| **自管 JSON 存储**   | `~/.config/opencode/missions/<workspace>/<sessionID>.json`，跨端（Windows / macOS / Linux），跨项目隔离 |
 
 ## 安装
 
@@ -151,8 +153,8 @@ opencode
 ## 已知限制
 
 - **续跑 + 中断追踪依赖 `EventSessionIdle`**：交互 TUI 实测可用；`opencode run`（headless）模式不发送此事件
-- **verify JSON 解析** 依赖子智能体严格输出 `\`\`\`json { verdict, scores } \`\`\`` 块
-- **存储** 走 V1 HeyApi client 强转 `metadata`（V1 SDK 类型不暴露，server 1.16.x 实际支持）
+- **verify JSON 解析** 依赖子智能体严格输出 `\`\`\`json { verdict, scores } \`\`\`` 块；解析失败走 fail-open 兜底（标 `judgeFailed: true` 强制 mark complete，避免用户被困）
+- **Sub-agent 路由** 调 `getSession` 走 `globalThis.fetch`，opencode 1.17.x 跨进程网络隔离可能阻；当前 fallback 返回 `null`（主流程无影响）
 
 ## 开发
 

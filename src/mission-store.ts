@@ -24,6 +24,9 @@ import type { SessionHttp } from "./utils/session-http.js"
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const SOFT_TURN_CAP = 100
+// Cap on consecutive failed judge verdicts before the mission is auto-capped.
+// Lower than the turn cap because each judge call is a full LLM round-trip.
+const MAX_JUDGE_REACT = 5
 
 // ── MissionStore ─────────────────────────────────────────────────────────────
 
@@ -97,6 +100,7 @@ export class MissionStore {
       continuationCount: 0,
       budget: makeBudget(limits, now),
       consecutiveBlockAttempts: 0,
+      judgeReactAttempts: 0,
     }
     await this.http.writeMission(sessionID, mission)
     return mission
@@ -178,6 +182,7 @@ export class MissionStore {
       // Reset block threshold counter on resume so a fresh cycle starts clean.
       mission.consecutiveBlockAttempts = 0
       mission.lastBlockReason = undefined
+      mission.judgeReactAttempts = 0
     }
 
     await this.http.writeMission(sessionID, mission)
@@ -296,6 +301,31 @@ export class MissionStore {
     mission.updatedBy = "system"
     await this.http.writeMission(sessionID, mission)
     return mission
+  }
+
+  // Record a non-satisfying judge verdict and check the react cap. When the
+  // cap is reached, the mission is auto-transitioned to budget_limited so
+  // continuation stops. Returns the updated mission and whether the cap fired.
+  async recordJudgeReactAttempt(
+    sessionID: string,
+    maxAttempts: number = MAX_JUDGE_REACT,
+  ): Promise<{ mission: Mission | null; capped: boolean }> {
+    const mission = await this.read(sessionID)
+    if (!mission) return { mission: null, capped: false }
+    mission.judgeReactAttempts = (mission.judgeReactAttempts ?? 0) + 1
+    mission.updatedAt = Date.now()
+    mission.updatedBy = "system"
+    let capped = false
+    if (
+      mission.judgeReactAttempts >= maxAttempts &&
+      mission.status === "active"
+    ) {
+      mission.status = "budget_limited"
+      mission.terminalReason = `Judge react cap reached (${maxAttempts} non-satisfying verdicts)`
+      capped = true
+    }
+    await this.http.writeMission(sessionID, mission)
+    return { mission, capped }
   }
 
   async markComplete(sessionID: string, report?: VerificationReport): Promise<Mission | null> {

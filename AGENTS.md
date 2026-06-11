@@ -31,7 +31,7 @@ opencode-mission/
 │   │   ├── verify-prompt.ts      # Verify subagent system prompt
 │   │   └── verify-context.ts     # Subagent context injection template
 │   └── utils/
-│       ├── session-http.ts       # V1 HeyApi client wrapper for Session.metadata
+│       ├── session-http.ts       # File-based mission storage + raw fetch for sub-agent routing
 │       └── format.ts             # Formatting helpers (duration, number, status output)
 ├── dist/
 │   └── index.js                  # Built single-file bundle (~56 KB)
@@ -47,39 +47,56 @@ opencode-mission/
 
 ### 1. State machine
 
-`active / paused / blocked / complete` (4 states):
+`active / paused / blocked / budget_limited / complete` (5 states):
 
 - `active` — agent works autonomously
 - `paused` — user-initiated stop, **wallclock is frozen**
-- `blocked` — system-level stop (budget exhausted / runtime error), **wallclock keeps accumulating**
+- `blocked` — agent-declared, requires 3 consecutive same-reason attempts (see #2)
+- `budget_limited` — system-level stop (budget exhausted) or judge cap reached, **wallclock keeps accumulating**
 - `complete` — successful, triggered by the verify subagent
 
 Transition rules (see `mission-store.ts:assertTransition`):
 
-- `active` -> `paused` / `blocked`
-- `paused` / `blocked` -> `active`
+- `active` -> `paused` / `blocked` / `budget_limited`
+- `paused` / `blocked` / `budget_limited` -> `active`
 - any -> `cancelled` (clears the record)
 
-### 2. Persistence
+### 2. 3-turn blocked threshold and judge react cap
 
-The plugin uses the **V1 HeyApi client** injected by the plugin runtime (`(input.client as any)._client`) to read/write `Session.metadata.missionPro`:
+Agent-declared blocked (via `UpdateMission status="blocked"` with `actor="model"`) requires 3 consecutive same-reason attempts before the state actually transitions. Below the threshold, the attempt is recorded (`consecutiveBlockAttempts` + `lastBlockReason`) and the mission stays active. Counter resets on resume.
 
-- `v1Client.get({ url: ".../session/{id}" })` — read
-- `v1Client.patch({ url: ".../session/{id}", body: { metadata } })` — write
+Symmetric guard for the judge: when `recordJudgeReactAttempt` is called and the count reaches `MAX_JUDGE_REACT = 5` consecutive failed verdicts, the mission is auto-transitioned to `budget_limited` (with a terminal reason explaining the cap). This prevents infinite verify loops when the judge keeps rejecting without the agent making progress.
 
-Why V1 client:
+Runtime errors (`actor="runtime"`) still block immediately — no threshold.
 
-- The V1 wrapper bundles baseUrl, auth headers, and response parsing, which avoids bare-fetch issues.
-- The V1 SDK type `SessionUpdateData.body` does not declare `metadata` (the opencode 1.16.x server does accept it). The V1 client accepts the extra field and passes it through.
-- Reusing the runtime-injected client keeps cookies and auth consistent with other opencode tools.
+### 3. Persistence
 
-Storage key: `Session.metadata.missionPro` (namespaced to coexist with other mission plugins).
+The plugin owns mission state as JSON files under the user's config dir, decoupling from opencode server metadata APIs:
 
-### 3. SetMissionBudget: single-dimension-per-call
+```
+~/.config/opencode/missions/<workspace-slug>/<sessionID>.json
+```
+
+- Path built with `os.homedir() + path.join()` (cross-platform: Windows, macOS, Linux).
+- Workspace slug is sanitized from `PluginInput.directory` (URL-decoded, path separators replaced with `-`).
+- Atomic writes: write to `<file>.tmp`, then `rename` to `<file>` (POSIX atomic, Windows close-to-atomic).
+- Sub-agent routing uses raw `fetch` to `/api/session/{id}` (the 1.17.x canonical path) to find the parent session ID; falls back to a "no parent" sentinel if unreachable.
+
+The V2 SDK's `session.get()` method has a path-template substitution bug in 1.17.1 (sends literal `{id}` to the server, gets 500), so we use raw `fetch` instead.
+
+### 4. HTML response guard
+
+Whenever the plugin makes a raw fetch to the opencode server, the response body is checked: if it starts with `<!doctype` or `<html`, treat as a failed call. This is the SPA-fallback signal — the server is returning its web UI for an unknown route. Without the guard, the plugin would silently trust empty SPA pages as legitimate API responses.
+
+### 5. Fail-open on judge parse failure
+
+If the verify subagent's output cannot be parsed as a JSON report, attach a synthetic `VerificationReport { verdict: "failed", judgeFailed: true }` and mark complete anyway. Without this, a persistent parse failure traps the user in mission mode forever.
+
+### 6. SetMissionBudget: single-dimension-per-call
 
 `SetMissionBudget` accepts `{ value: number, unit: 'turns'|'tokens'|'milliseconds'|'seconds'|'minutes'|'hours' }` — one dimension per call. The unit is a closed enum so the LLM cannot send ambiguous wallclock amounts. To set three dimensions, the agent calls the tool three times.
 
-### 4. Continuation mechanism
+### 7. Continuation mechanism
 
 Primary trigger: `EventSessionIdle` (dedicated event in opencode 1.4.8+).
 
@@ -93,7 +110,7 @@ Interrupt tracking:
 
 Re-entry guard: `continuationInFlight: Set<sessionID>`.
 
-### 5. Tool design
+### 8. Tool design
 
 Four standalone tools. Each tool has a single, clear intent and an independent error path.
 
@@ -105,7 +122,7 @@ Main/subagent isolation:
 
 There is no dynamic tool visibility (not supported by the public plugin API). Each tool internally returns a friendly error when called with no active mission.
 
-### 6. Self-audit (4-dimension pre-declare checklist)
+### 9. Self-audit (4-dimension pre-declare checklist)
 
 Both the continuation prompt (`src/prompts.ts`) and the active system injection (`src/prompts-injection.ts`) force a 4-dimension self-audit before the agent considers the work complete:
 
@@ -116,7 +133,14 @@ Both the continuation prompt (`src/prompts.ts`) and the active system injection 
 
 A plan, summary, or first pass is NOT a complete result. This is borrowed from mature goal-driver design — without explicit self-audit, agents tend to declare completion after partial work.
 
-### 7. Verify mechanism
+The active system injection also includes:
+
+- A `<mission_status>` block with structured fields (Status, Objective, Time used, Tokens used, Budget guidance, Commands)
+- A dynamic `Commands:` list scoped to the current status
+- A 3-turn block-threshold reminder when prior attempts have been recorded
+- A wrap-up directive when budget is over (instead of starting new work, summarize + identify remaining work + leave a clear next step)
+
+### 10. Verify mechanism
 
 The `mission-verify` subagent is registered via the `config` hook with a dedicated system prompt. It owns `GetMission` / `UpdateMission` tool access but no write tools (read-only auditor).
 
@@ -156,8 +180,8 @@ Rules: one `bash` call per command; start dev servers in the background with exp
 ## Important constraints
 
 1. **DO NOT** modify `mission-store.ts:assertTransition` without updating `DESIGN.md §2` (state transition table).
-2. **DO NOT** change the persistence approach in `utils/session-http.ts` (V1 HeyApi client wrapper). This is the only way we have access to the runtime's auth context.
-3. **DO NOT** rename the `Session.metadata.missionPro` storage key — it coexists with other mission plugins.
+2. **DO NOT** revert `utils/session-http.ts` to V1 HeyApi client PATCH — the opencode 1.17.x server removed the metadata PATCH endpoint; the file-based JSON storage at `~/.config/opencode/missions/<workspace>/<sessionID>.json` is the only reliable persistence path. Mission state is owned by this plugin, not by opencode server metadata.
+3. **DO NOT** change the storage directory layout without a migration plan — the file path `<workspace-slug>/<sessionID>.json` is part of the public contract (it lives on the user's filesystem).
 4. **DO NOT** introduce `as any` in tool code; use `ctx.agent` to distinguish main vs sub.
 5. **DO NOT** leak `terminalReason` into the continuation prompt (it goes in the system injection, the continuation prompt stays clean).
 6. **DO NOT** remove the ABSOLUTE RULE from `command-template.ts` — without it, agents skip `CreateMission` and the entire plugin stays inert.
@@ -173,24 +197,26 @@ A task is "done" only when all of the following pass:
 - [ ] The mission-verify subagent gets spawned after the main work is done
 - [ ] Auto-complete fires: `GetMission` returns "No active mission" after the JSON report parses with `verdict === "passed"`
 - [ ] `/mission status` shows budget usage and continuation count
-- [ ] `/mission budget set turns=2` followed by enough work causes the mission to transition to `blocked`
+- [ ] `/mission budget set turns=2` followed by enough work causes the mission to transition to `budget_limited` (not `blocked`)
 - [ ] User Esc during autonomous work -> mission transitions to `paused`; `/mission resume` re-activates and wallclock resumes from where it was frozen
 - [ ] A non-`mission-verify` subagent calling `UpdateMission` receives the "not authorized" error
-- [ ] Session metadata persists across opencode server restarts
+- [ ] Mission state persists across opencode server restarts (file-based storage at `~/.config/opencode/missions/<workspace>/<sessionID>.json`)
 
 ## Known limitations
 
-1. **Verify JSON parsing is fragile** — depends on the subagent emitting a strict `\`\`\`json { verdict, scores } \`\`\`` block. A future version could have the subagent emit via a structured tool.
+1. **Verify JSON parsing is fragile** — depends on the subagent emitting a strict `\`\`\`json { verdict, scores } \`\`\`` block. Fail-open (see #5 below) catches parse failures; a future version could replace the free-text parser with a structured tool emit.
 2. **Wallclock precision** — uses `Date.now()`, subject to system clock adjustments.
 3. **Token accumulation** — depends on `EventMessageUpdated` carrying `AssistantMessage.tokens`. If opencode changes this field shape, accumulation may break.
 4. **Continuation in headless mode** — the `event` hook has not been observed receiving `session.idle` events during `opencode run` (headless) testing. The mechanism is structurally correct but should be validated in interactive TUI mode where the user can press Esc and observe pause behavior.
-5. **V1 SDK type lag** — SDK 1.4.8 does not declare `metadata` in `SessionUpdateData.body`. The opencode 1.16.x server accepts it; we rely on V1 client wrapper accepting the extra field. Future SDK or server changes could break this.
+5. **Sub-agent routing on opencode 1.17.x** — `getSession` uses raw `fetch` to `/api/session/{id}` (the canonical 1.17.x path; V2 SDK has a `{sessionID}` template-substitution bug). On 1.17.x the plugin process may be sandboxed away from the server, in which case `getSession` returns null and the main flow continues safely (sub-agent routing falls back to a "no parent" sentinel).
+6. **Single mission per session** — the JSON file schema allows extension to a `missionsPro: Mission[]` array for parallel missions; not implemented in v1.
 
 ## Future work (v2+)
 
-- Multi-mission parallel execution (extend metadata schema to `missionsPro: Mission[]`).
+- Multi-mission parallel execution (extend the JSON file schema to a `missions: Mission[]` array per session).
 - Budget pool (multiple missions sharing a token budget).
 - Verify report visualization (custom TUI panel).
 - Status change notifications via `EventTuiToastShow`.
 - `/mission history` command.
+- Side-channel parentID propagation for mission-verify (so it works even when `getSession` cannot reach the opencode server).
 - Structured emit (tool instead of free text) for verify report to remove JSON-parsing fragility.
