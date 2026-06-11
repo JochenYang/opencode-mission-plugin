@@ -1,5 +1,13 @@
 # opencode-mission
 
+**English** | [**中文**](README.md)
+
+[![npm version](https://img.shields.io/npm/v/opencode-mission?style=flat-square)](https://www.npmjs.com/package/opencode-mission)
+[![License: MIT](https://img.shields.io/npm/l/opencode-mission?style=flat-square)](https://github.com/JochenYang/opencode-mission-plugin/blob/main/LICENSE)
+[![Node >=18](https://img.shields.io/badge/Node-%3E%3D18-339933?style=flat-square&logo=node.js&logoColor=white)](https://www.npmjs.com/package/opencode-mission)
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![GitHub stars](https://img.shields.io/github/stars/JochenYang/opencode-mission-plugin?style=flat-square)](https://github.com/JochenYang/opencode-mission-plugin)
+
 An OpenCode plugin that adds an autonomous mission-driven agent mode: the user sets a mission, the agent works across multiple turns until the mission is achieved, paused, or blocked.
 
 ## Features
