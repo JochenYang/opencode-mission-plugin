@@ -2,6 +2,9 @@
 node_modules/
 dist/
 
+# npm pack output
+*.tgz
+
 # Logs
 *.log
 

@@ -19,6 +19,23 @@
 
 ## 安装
 
+### 推荐：npm 全局安装（自动配置）
+
+```bash
+npm install -g opencode-mission
+# 或 bun add -g opencode-mission
+```
+
+`postinstall` 会自动：
+
+1. 把 `dist/index.js` 拷到 `~/.config/opencode/plugins/opencode-mission.js`
+2. 在 `~/.config/opencode/opencode.json` 的 `plugin` 数组里追加 `./plugins/opencode-mission.js`（已存在则跳过）
+3. 卸载时（`npm uninstall -g opencode-mission`）自动从 `opencode.json` 移除条目
+
+> Windows：`%APPDATA%\opencode\`；macOS / Linux：`~/.config/opencode/`。
+
+### 手动安装（开发或自定义构建）
+
 在 `~/.config/opencode/opencode.json` 中追加：
 
 ```json

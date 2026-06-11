@@ -7,10 +7,20 @@
   "exports": {
     ".": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "scripts",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "bun build ./src/index.ts --outfile ./dist/index.js --target node --format esm --external @opencode-ai/plugin --external @opencode-ai/plugin/tool --external @opencode-ai/sdk --external @opencode-ai/sdk/v2 --external zod --external effect",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "prepublishOnly": "bun run build",
+    "postinstall": "node scripts/postinstall.mjs",
+    "postuninstall": "node scripts/postuninstall.mjs"
   },
   "dependencies": {
     "@opencode-ai/plugin": "*"
@@ -26,7 +36,11 @@
   ],
   "author": "",
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "devDependencies": {
     "@types/node": "^25.9.2"
   }
 }
+

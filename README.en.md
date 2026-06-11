@@ -19,6 +19,23 @@ An OpenCode plugin that adds an autonomous mission-driven agent mode: the user s
 
 ## Installation
 
+### Recommended: install from npm (auto-configures)
+
+```bash
+npm install -g opencode-mission
+# or: bun add -g opencode-mission
+```
+
+The `postinstall` script will automatically:
+
+1. Copy `dist/index.js` to `~/.config/opencode/plugins/opencode-mission.js`
+2. Add `./plugins/opencode-mission.js` to the `plugin` array in `~/.config/opencode/opencode.json` (skipped if already present)
+3. On uninstall (`npm uninstall -g opencode-mission`), remove the entry from `opencode.json`
+
+> Windows: `%APPDATA%\opencode\`. macOS / Linux: `~/.config/opencode/`.
+
+### Manual install (development or custom build)
+
 Add to `~/.config/opencode/opencode.json`:
 
 ```json
