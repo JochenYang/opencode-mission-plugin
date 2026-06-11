@@ -1,6 +1,6 @@
 {
   "name": "opencode-mission",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode plugin that enables autonomous mission-driven agent mode with 4-state machine, 3-dimension budget (turn/token/wallclock), structured 4-dimension verification, and interrupt-aware auto-pause.",
   "type": "module",
   "main": "./dist/index.js",

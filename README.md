@@ -40,7 +40,7 @@ npm install -g opencode-mission
 2. 在 `~/.config/opencode/opencode.json` 的 `plugin` 数组里追加 `./plugins/opencode-mission.js`（已存在则跳过）
 3. 卸载时（`npm uninstall -g opencode-mission`）自动从 `opencode.json` 移除条目
 
-> Windows：`%APPDATA%\opencode\`；macOS / Linux：`~/.config/opencode/`。
+> 跨平台统一路径：`~/.config/opencode/`（可用 `$XDG_CONFIG_HOME` 覆盖）。
 
 ### 手动安装（开发或自定义构建）
 

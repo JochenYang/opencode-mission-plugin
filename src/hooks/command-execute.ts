@@ -18,7 +18,7 @@ export function createCommandExecuteHook(): Pick<Hooks, "command.execute.before"
 
       // Prepend a short user-visible summary
       const args = input.arguments?.trim() ?? ""
-      const summary = args ? `🎯 /mission ${truncate(args, 60)}` : "🎯 /mission"
+      const summary = args ? `/mission ${truncate(args, 60)}` : "/mission"
       output.parts.unshift({
         type: "text" as const,
         text: summary,

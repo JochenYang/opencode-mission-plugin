@@ -23,6 +23,7 @@ import { createEventHook } from "./hooks/event-hook.js"
 import { createChatMessageHook } from "./hooks/chat-message.js"
 import { createSystemTransformHook } from "./hooks/system-transform.js"
 import { createCommandExecuteHook } from "./hooks/command-execute.js"
+import { log } from "./utils/log.js"
 import { MISSION_COMMAND_TEMPLATE } from "./command-template.js"
 import { VERIFY_AGENT_PROMPT } from "./verify/verify-prompt.js"
 
@@ -45,10 +46,6 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
     fetch: v1Client?.getConfig?.()?.fetch,
   })
   const store = new MissionStore(http)
-
-  const log = (msg: string) => {
-    console.error(msg)
-  }
 
   // Tool registration
   const createTool = createMissionTool(store)

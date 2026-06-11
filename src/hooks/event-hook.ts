@@ -44,6 +44,18 @@ export function createEventHook(deps: ContinuationHookDeps) {
     const type = event?.type as string | undefined
     if (!type) return
 
+    // LLM token-by-token output: every part.delta = LLM is actively generating
+    if (type === "message.part.delta") {
+      const sessionID = event.properties?.sessionID
+      const field = event.properties?.field
+      const delta = event.properties?.delta
+      const len = typeof delta === "string" ? delta.length : 0
+      debug(
+        `message.part.delta sessionID=${sessionID} field=${field} len=${len}`,
+      )
+      return
+    }
+
     // Interrupt tracking
     if (type === "session.error") {
       const props = event.properties ?? {}
@@ -103,8 +115,24 @@ export function createEventHook(deps: ContinuationHookDeps) {
       }
     }
 
-    // Primary continuation trigger: session.idle
-    if (type === "session.idle") {
+    // Primary continuation trigger.
+    // In opencode 1.17.x the EventV2 "session.idle" event is bridged onto
+    // the GlobalBus as "session.status" (with status.type === "idle" on
+    // the idle transition). Filter on both fields so we catch the right
+    // transition regardless of which side of the bridge the type string
+    // ends up on.
+    if (type === "session.status") {
+      const s = event.properties?.status
+      debug(
+        `session.status event: statusType=${typeof s === "string" ? s : s?.type} ` +
+          `statusJson=${JSON.stringify(s)?.slice(0, 200)}`,
+      )
+    }
+    if (
+      type === "session.status" &&
+      (event.properties?.status?.type === "idle" ||
+        event.properties?.status === "idle")
+    ) {
       const sessionID: string | undefined = event.properties?.sessionID
       if (!sessionID) return
       // Prevent re-entry
@@ -133,10 +161,14 @@ export function createEventHook(deps: ContinuationHookDeps) {
     const mission = await store.read(sessionID)
     if (!mission) return
 
-    // 2. Resolve parent session via http.getSession; skip subagent sessions
+    // 2. Resolve parent session via http.getSession; skip subagent sessions.
+    //    If getSession fails (returns null), fall through and treat the
+    //    session as a main session so the continuation loop keeps running.
+    //    On opencode 1.17.x the plugin process is often sandboxed away
+    //    from the server, so a null result here is the common case — not
+    //    an error worth aborting auto-continuation for.
     const session = await http.getSession(sessionID)
-    if (!session) return
-    if (session.parentID) {
+    if (session && session.parentID) {
       debug(`subagent session, skip sessionID=${sessionID}`)
       return
     }

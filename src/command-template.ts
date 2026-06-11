@@ -70,14 +70,19 @@ Before declaring any mission done, run the 4-dimension self-audit:
 3. Integration — the new pieces fit the existing codebase.
 4. Robustness — edge cases are handled.
 
-A plan, summary, or first pass is NOT a complete result. If any dimension fails, do the missing work and re-audit. If you are certain all four pass, call the \`mission-verify\` subagent via the Task tool to independently confirm. Do NOT call UpdateMission with status="complete" yourself.
+A plan, summary, or first pass is NOT a complete result. If any dimension fails, do the missing work and re-audit.
+
+After 4-dimension self-audit:
+- **All four pass**: you MUST call the \`task\` tool with \`subagent_type: "mission-verify"\` IMMEDIATELY in the same turn. Do NOT stop, do NOT ask the user, do NOT wait for confirmation. The verify is REQUIRED, not optional.
+- **Any dimension fails**: do the missing work in this turn and re-audit. Do NOT stop to ask the user.
+- **Cannot make all four pass**: call \`UpdateMission status="blocked"\` with a clear reason.
 
 ## Bash + dev-server protocol (READ THIS)
 
 You are running in a PowerShell-on-Windows shell inside opencode. Two things will block your turn if mishandled:
 
 - **Permission prompts** — opencode will pop a permission dialog for every unfamiliar bash command. If you start a long-running server, the dialog blocks, the user has to manually approve, and the turn appears "stuck".
-- **Detached processes** — \`Start-Process\` with no \`-Wait\` leaves the parent shell waiting on an interactive prompt (\`Id:\`).
+- **Detached processes** — \`Start-Process\` with no \`-Wait\` leaves the parent shell waiting on an interactive prompt (\`Id:\`). The fix is \`-NoNewWindow -PassThru\`, AND wrap in \`(...)\` + access \`.Id\` directly (NEVER pipe to \`Select-Object Id\` — that pipeline hangs in opencode's stdio host).
 
 ### Avoiding permission prompts
 
@@ -112,12 +117,16 @@ Get-Process -Name "node" -ErrorAction SilentlyContinue | Stop-Process -Force -Er
 Remove-Item "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\opencode\\dev.log" -ErrorAction SilentlyContinue
 
 # Step 3: start backend
-Start-Process -FilePath "cmd.exe" -ArgumentList "/c","npm run start" -RedirectStandardOutput "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\opencode\\dev.log" -RedirectStandardError "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\opencode\\dev.err" -NoNewWindow -PassThru | Select-Object Id
+$pid = (Start-Process -FilePath "node.exe" -ArgumentList "server.js" -WorkingDirectory "D:\\codes\\mission-test-todo" -RedirectStandardOutput "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\opencode\\dev.log" -RedirectStandardError "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\opencode\\dev.err" -NoNewWindow -PassThru).Id
 
-# Step 4: wait for boot
+# Step 4: verify the detached process is actually alive (Start-Process -PassThru returns PID before Node is up)
+Start-Sleep -Milliseconds 500
+Get-Process -Id $pid -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, StartTime
+
+# Step 5: wait for boot
 Start-Sleep -Seconds 3
 
-# Step 5: probe
+# Step 6: probe
 try { (Invoke-RestMethod -Uri "http://localhost:3001/api/properties" -TimeoutSec 5).Count } catch { "FAILED" }
 \`\`\`
 

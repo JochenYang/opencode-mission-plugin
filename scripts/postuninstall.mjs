@@ -10,14 +10,11 @@ const PLUGIN_REF = "./plugins/opencode-mission.js"
 const log = (msg) => console.log(`[opencode-mission] ${msg}`)
 
 function opencodeConfigDir() {
-  if (process.platform === "win32") {
-    const appdata = process.env.APPDATA
-    if (appdata) return path.join(appdata, "opencode")
-    return path.join(os.homedir(), "AppData", "Roaming", "opencode")
-  }
+  // opencode is XDG-style on every platform: ~/.config/opencode
+  // (overridable with $XDG_CONFIG_HOME)
   const xdg = process.env.XDG_CONFIG_HOME
-  if (xdg) return path.join(xdg, "opencode")
-  return path.join(os.homedir(), ".config", "opencode")
+  const base = xdg && xdg.length > 0 ? xdg : os.homedir()
+  return path.join(base, ".config", "opencode")
 }
 
 async function main() {

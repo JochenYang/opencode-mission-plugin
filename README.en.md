@@ -40,7 +40,7 @@ The `postinstall` script will automatically:
 2. Add `./plugins/opencode-mission.js` to the `plugin` array in `~/.config/opencode/opencode.json` (skipped if already present)
 3. On uninstall (`npm uninstall -g opencode-mission`), remove the entry from `opencode.json`
 
-> Windows: `%APPDATA%\opencode\`. macOS / Linux: `~/.config/opencode/`.
+> Cross-platform: `~/.config/opencode/` (overridable via `$XDG_CONFIG_HOME`).
 
 ### Manual install (development or custom build)
 

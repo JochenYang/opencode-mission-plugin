@@ -51,7 +51,7 @@ opencode
 
 - [ ] agent **第一个**工具调用是 `CreateMission`（不是 GetMission / todowrite）
 - [ ] 写代码 + 跑 `bun test` 通过
-- [ ] agent **显式调 task 工具启动 mission-verify 子智能体**
+- [ ] agent **写完代码后不询问，直接调 task 工具启动 mission-verify 子智能体**（不允许问"需要跑 verify 吗？"）
 - [ ] 子智能体输出 4 维 JSON 评分 + verdict
 - [ ] `GetMission` 返回 "No active mission"（mission 已归档）
 - [ ] agent 给一个简短的交付报告（已验证/未验证/下一步）

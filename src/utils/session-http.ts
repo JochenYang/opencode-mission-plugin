@@ -19,6 +19,9 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import type { Mission } from "../types.js"
+import { log as fileLog } from "./log.js"
+
+const log = (msg: string) => fileLog(`[mission] ${msg}`)
 
 export interface SessionHttpConfig {
   // The V2 SDK client (input.client in the plugin runtime). Used only for
@@ -91,7 +94,7 @@ export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
       (v1?.getConfig?.() as any)?.directory ??
       (v2Client?.getConfig?.() as any)?.directory
     if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-      console.error(`[mission] projectSlug raw=${raw}`)
+      log(`projectSlug raw=${raw}`)
     }
     return projectSlug(raw)
   }
@@ -121,7 +124,7 @@ export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
     // fetch-wrapper "v[0]" error on raw responses.
     const url = `${stripSlash(baseUrl())}/api/session/${encodeURIComponent(sessionID)}`
     if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-      console.error(`[mission] GET ${url}`)
+      log(`GET ${url}`)
     }
     try {
       const response = await globalThis.fetch(url, {
@@ -140,7 +143,7 @@ export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
         throw new Error(`Session API returned no id: ${text.slice(0, 200)}`)
       }
       if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-        console.error(`[mission] GET ok parentID=${data.parentID ?? "(none)"}`)
+        log(`GET ok parentID=${data.parentID ?? "(none)"}`)
       }
       return {
         id: data.id,
@@ -149,9 +152,7 @@ export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
       }
     } catch (err: any) {
       if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-        console.error(
-          `[mission] GET FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`,
-        )
+        log(`GET FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`)
       }
       return null
     }
@@ -160,7 +161,7 @@ export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
   async function readMission(sessionID: string): Promise<Mission | null> {
     const file = missionPath(sessionID)
     if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-      console.error(`[mission] READ ${file}`)
+      log(`READ ${file}`)
     }
     try {
       const text = await readFile(file, "utf8")
@@ -168,13 +169,11 @@ export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
     } catch (err: any) {
       if (err?.code === "ENOENT") {
         if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-          console.error(`[mission] READ miss (no file)`)
+          log(`READ miss (no file)`)
         }
         return null
       }
-      console.error(
-        `[mission] READ FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`,
-      )
+      log(`READ FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`)
       throw err
     }
   }
@@ -184,22 +183,20 @@ export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
     if (mission === null) {
       // Cancellation: best-effort delete; missing file is fine
       if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-        console.error(`[mission] DELETE ${file}`)
+        log(`DELETE ${file}`)
       }
       try {
         await unlink(file)
       } catch (err: any) {
         if (err?.code !== "ENOENT") {
-          console.error(
-            `[mission] DELETE FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`,
-          )
+          log(`DELETE FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`)
         }
       }
       return
     }
     const tmp = `${file}.tmp`
     if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-      console.error(`[mission] WRITE ${file}`)
+      log(`WRITE ${file}`)
     }
     await mkdir(dirname(file), { recursive: true })
     await writeFile(tmp, JSON.stringify(mission, null, 2), "utf8")

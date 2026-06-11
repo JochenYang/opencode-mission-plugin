@@ -2,8 +2,8 @@
 // and register it in opencode.json so opencode loads it on next start.
 //
 // Idempotent: re-running postinstall (e.g. on `npm i -g --force`) is safe.
-// Cross-platform: resolves the config dir from APPDATA on Windows, XDG_HOME
-// on Linux/macOS, with an os.homedir() fallback.
+// Cross-platform: resolves the opencode config dir as ~/.config/opencode
+// (XDG-style on every platform, overridable with $XDG_CONFIG_HOME).
 
 import { promises as fs } from "node:fs"
 import os from "node:os"
@@ -19,14 +19,11 @@ const log = (msg) => console.log(`[opencode-mission] ${msg}`)
 const warn = (msg) => console.warn(`[opencode-mission] ${msg}`)
 
 function opencodeConfigDir() {
-  if (process.platform === "win32") {
-    const appdata = process.env.APPDATA
-    if (appdata) return path.join(appdata, "opencode")
-    return path.join(os.homedir(), "AppData", "Roaming", "opencode")
-  }
+  // opencode is XDG-style on every platform: ~/.config/opencode
+  // (overridable with $XDG_CONFIG_HOME)
   const xdg = process.env.XDG_CONFIG_HOME
-  if (xdg) return path.join(xdg, "opencode")
-  return path.join(os.homedir(), ".config", "opencode")
+  const base = xdg && xdg.length > 0 ? xdg : os.homedir()
+  return path.join(base, ".config", "opencode")
 }
 
 async function copyPlugin(targetDir) {

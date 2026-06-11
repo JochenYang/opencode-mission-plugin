@@ -69,7 +69,14 @@ ${budgetGuidance}
 
 Do not run another turn if the objective is simple, already answered, impossible, unsafe, or contradictory. In that case, call UpdateMission with \`complete\` or \`blocked\` in this same turn.
 
-Otherwise, weigh the objective and any completion criteria against the work done so far. Mission mode is iterative: do one coherent slice of work, then reassess.
+Otherwise, weigh the objective and any completion criteria against the work done so far. Mission mode is iterative.
+
+**Do NOT end the turn after one slice.** Keep working in the same turn until one of:
+- Mission is verifiably complete (you are about to call the \`task\` tool with the \`mission-verify\` subagent)
+- You hit a budget limit (in which case run the wrap-up directive above)
+- You are genuinely blocked and need user input (in which case call \`UpdateMission status="blocked"\` with a clear reason)
+
+"Reassess" means check your progress and decide the next concrete action — it does NOT mean stop the turn. Concrete next actions: run the next command, write the next file, call the next tool. Do not narrate that you are continuing — execute.
 
 ## Self-audit checklist (before declaring done)
 
@@ -81,6 +88,8 @@ Before calling UpdateMission status="complete", verify each of these against the
 4. **Robustness**: the obvious edge cases are handled (empty input, error paths, boundary values).
 
 If any of the four fails, do not mark complete. Do the missing work this turn, then re-audit.
+
+If all four pass, you MUST call the \`task\` tool with \`subagent_type: "mission-verify"\` IMMEDIATELY in this turn. Do NOT stop, do NOT ask the user, do NOT wait. The verify is mandatory, not optional. Only the verify subagent can mark the mission complete — never call \`UpdateMission status="complete"\` yourself.
 
 If the objective cannot be completed as stated (external blocker, contradictory requirements, required user input), call UpdateMission status="blocked" with a concrete reason.
 

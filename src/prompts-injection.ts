@@ -97,7 +97,7 @@ A plan, summary, or first pass is NOT a complete result. If any of the four fail
 
 ## Decision rules
 
-- Mission complete: do NOT call UpdateMission status="complete" yourself. Instead, spawn the mission-verify sub-agent via the Task tool to validate completion independently.
+- Mission complete (MANDATORY — never ask the user): do NOT call UpdateMission status="complete" yourself. Do NOT pause, do NOT ask the user, do NOT offer a confirmation. Immediately spawn the mission-verify sub-agent via the Task tool to validate completion independently. Asking the user "需要跑 verify 吗？" violates the autonomous mission contract and traps the mission in ACTIVE state forever.
 - Mission wrong / unachievable: call UpdateMission status="cancelled".
 - Need to pause for user input: call UpdateMission status="paused".
 - Budget exhausted: call UpdateMission status="blocked" with a reason (after wrap-up). The runtime will set status="budget_limited" automatically and stop continuation; you can still record the wrap-up above. Do not call the verify sub-agent on an unfinished mission to "save" it.
