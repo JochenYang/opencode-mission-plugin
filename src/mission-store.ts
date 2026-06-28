@@ -19,6 +19,7 @@ import type {
   VerificationReport,
 } from "./types.js"
 import { isOverBudget } from "./utils/format.js"
+import type { MissionStorage } from "./mission-storage.js"
 import type { SessionHttp } from "./utils/session-http.js"
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -31,16 +32,26 @@ const MAX_JUDGE_REACT = 5
 // ── MissionStore ─────────────────────────────────────────────────────────────
 
 export class MissionStore {
+  private storage: MissionStorage
   private http: SessionHttp
 
-  constructor(http: SessionHttp) {
+  /**
+   * @param storage Mission persistence backend. Owns the read/write of the
+   *   mission record; can be either a file-backed or a session-metadata-backed
+   *   implementation (see mission-storage.ts).
+   * @param http Session-info lookup. Used only to read the parent session ID
+   *   (for sub-agent routing decisions in shouldContinue). Mission data
+   *   itself does not pass through this dependency.
+   */
+  constructor(storage: MissionStorage, http: SessionHttp) {
+    this.storage = storage
     this.http = http
   }
 
   // ── Read ───────────────────────────────────────────────────────────────
 
   async read(sessionID: string): Promise<Mission | null> {
-    return this.http.readMission(sessionID)
+    return this.storage.read(sessionID)
   }
 
   async snapshot(sessionID: string): Promise<{
@@ -102,7 +113,7 @@ export class MissionStore {
       consecutiveBlockAttempts: 0,
       judgeReactAttempts: 0,
     }
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return mission
   }
 
@@ -121,7 +132,7 @@ export class MissionStore {
 
     // cancelled is a special path: remove the record
     if (target === "cancelled") {
-      await this.http.writeMission(sessionID, null)
+      await this.storage.write(sessionID, null)
       return { mission: { ...mission, status: "complete" }, stopped: true }
     }
 
@@ -138,7 +149,7 @@ export class MissionStore {
       mission.updatedAt = Date.now()
       mission.updatedBy = actor
       if (mission.consecutiveBlockAttempts < 3) {
-        await this.http.writeMission(sessionID, mission)
+        await this.storage.write(sessionID, mission)
         throw new Error(
           `Block threshold not met: this is attempt ${mission.consecutiveBlockAttempts}/3 ` +
             `for the same reason. The mission stays active. Re-attempt ` +
@@ -185,7 +196,7 @@ export class MissionStore {
       mission.judgeReactAttempts = 0
     }
 
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return { mission, stopped: target !== "active" }
   }
 
@@ -222,7 +233,7 @@ export class MissionStore {
     mission.budget = next
     mission.updatedAt = Date.now()
     mission.updatedBy = "model"
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return { mission, overBudget: isOverBudget(mission) }
   }
 
@@ -236,7 +247,7 @@ export class MissionStore {
     mission.budget.turnsUsed = mission.continuationCount
     mission.lastContinuationAt = now
     mission.updatedAt = now
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return mission
   }
 
@@ -246,7 +257,7 @@ export class MissionStore {
     if (!mission) return null
     mission.budget.tokensUsed += deltaTokens
     mission.updatedAt = Date.now()
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return mission
   }
 
@@ -260,7 +271,7 @@ export class MissionStore {
     const now = Date.now()
     const elapsed = now - start - mission.budget.totalPausedMs
     mission.budget.wallClockMs = Math.max(0, elapsed)
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return mission
   }
 
@@ -272,7 +283,7 @@ export class MissionStore {
     mission.terminalReason = reason
     mission.updatedAt = Date.now()
     mission.updatedBy = "runtime"
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return mission
   }
 
@@ -289,7 +300,7 @@ export class MissionStore {
     mission.terminalReason = reason
     mission.updatedAt = Date.now()
     mission.updatedBy = "runtime"
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return mission
   }
 
@@ -299,7 +310,7 @@ export class MissionStore {
     mission.verificationReport = report
     mission.updatedAt = Date.now()
     mission.updatedBy = "system"
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return mission
   }
 
@@ -324,7 +335,7 @@ export class MissionStore {
       mission.terminalReason = `Judge react cap reached (${maxAttempts} non-satisfying verdicts)`
       capped = true
     }
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return { mission, capped }
   }
 
@@ -340,7 +351,7 @@ export class MissionStore {
     mission.updatedAt = Date.now()
     mission.updatedBy = "system"
     if (report) mission.verificationReport = report
-    await this.http.writeMission(sessionID, mission)
+    await this.storage.write(sessionID, mission)
     return mission
   }
 

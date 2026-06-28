@@ -23,7 +23,7 @@ An OpenCode plugin that adds an autonomous mission-driven agent mode: the user s
 | **Status-adaptive system prompt** | `<mission_status>` block + dynamic commands + 3-turn reminder + wrap-up directive |
 | **Self-audit**                 | Every turn's continuation prompt + system prompt force a 4-dim self-check       |
 | **Interrupt semantics**        | User Esc → `paused` (wallclock frozen) / runtime error → `blocked`              |
-| **Self-managed JSON storage**  | `~/.config/opencode/missions/<workspace>/<sessionID>.json`, cross-platform (Windows / macOS / Linux), per-project isolation |
+| **Pluggable storage**  | Default: self-managed JSON at `~/.config/opencode/missions/<workspace>/<sessionID>.json`. Optional: opencode session metadata (requires 1.18+) |
 
 ## Installation
 
@@ -176,11 +176,36 @@ Then in the TUI prompt:
 - mission-verify subagent gets spawned
 - mission auto-completes; `GetMission` returns "No active mission"
 
+## Storage backends
+
+The default mode is self-managed JSON files (see path below), independent of any opencode version. If you are on opencode 1.18+ and want missions to be inherited automatically when a session is forked, switch to the session-metadata mode:
+
+```bash
+# Default (0.2.x behavior, works on every opencode version)
+unset OPENCODE_MISSION_STORAGE
+
+# Optional: store the mission inside the opencode session's metadata
+# Pros: automatic fork inheritance, centralized backup, no extra disk footprint
+# Requires: opencode 1.18+ with a working /session/:id PATCH endpoint
+export OPENCODE_MISSION_STORAGE=metadata
+```
+
+| Mode | Storage location | Requires | Fork inheritance |
+|------|------------------|----------|------------------|
+| `file` (default) | `~/.config/opencode/missions/<workspace>/<sessionID>.json` | nothing | no (manual continuation API needed) |
+| `metadata` | `Session.metadata.mission` (via `PATCH /session/:id`) | opencode 1.18+ | yes (server copies parent session metadata into child session) |
+
+**Switching takes effect at next plugin boot** (env is read at startup). The two modes do not pollute each other: if you switch storage on a session, the old mission stays in the old storage untouched and new writes go to the new storage.
+
+**Gotchas**:
+- In metadata mode a PATCH failure raises a hard error (no silent fallback to file). This is intentional: a silent fallback would hide a misconfiguration from you at the worst possible time.
+- If you fork a session and want the new session to keep the mission, read from the parent session's ID, not the new fork's ID.
+
 ## Known limitations
 
 - **Continuation + interrupt tracking depends on `EventSessionIdle`**: works in interactive TUI; `opencode run` (headless) does not emit this event.
 - **Verify JSON parsing** depends on the subagent emitting a strict `\`\`\`json { verdict, scores } \`\`\`` block.
-- **Storage** is self-managed JSON files at `~/.config/opencode/missions/<workspace>/<sessionID>.json`, with atomic writes (temp + rename). Per-project isolation via sanitized workspace slugs.
+- **Storage** is self-managed JSON files at `~/.config/opencode/missions/<workspace>/<sessionID>.json`, with atomic writes (temp + rename). Per-project isolation via sanitized workspace slugs. (For an alternative that auto-inherits on session fork, see [Storage backends](#storage-backends).)
 - **Sub-agent routing** uses `globalThis.fetch` to call `/api/session/{id}`. On opencode 1.17.x the plugin process may be sandboxed away from the server; the fallback returns `null` which is safe for the main flow (sub-agent routing becomes a known limitation).
 
 ## Development

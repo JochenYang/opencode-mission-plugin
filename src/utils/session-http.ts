@@ -1,11 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-//  Mission storage and session info
-//
-// 1.17.x removed the legacy PATCH endpoint for arbitrary session metadata.
-// We own mission state ourselves in a JSON file under the user's config
-// dir, so we are decoupled from opencode server API changes. The storage
-// path is built with os.homedir() + path.join() so the same code runs on
-// Windows, macOS, and Linux without changes.
+//  Session info lookup (mission storage is delegated to MissionStorage)
 //
 // For sub-agent routing we need the parent session's ID. The V2 SDK's
 // client.session.get() does not substitute the {sessionID} path template
@@ -13,12 +7,17 @@
 // literal string "{id}"). We sidestep that bug with a direct raw fetch to
 // the canonical API path /api/session/:sessionID that we verified in the
 // opencode source (groups/session.ts).
+//
+// Mission persistence is now handled by the MissionStorage abstraction
+// (see mission-storage.ts). The two thin methods readMission / writeMission
+// remain on SessionHttp as a compatibility shim that delegates to the
+// provided storage backend, so existing call sites (MissionStore, hooks,
+// tools) can keep using one dependency injection without churn. New code
+// should depend on MissionStorage directly.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
-import { homedir } from "node:os"
-import { dirname, join } from "node:path"
 import type { Mission } from "../types.js"
+import type { MissionStorage } from "../mission-storage.js"
 import { log as fileLog } from "./log.js"
 
 const log = (msg: string) => fileLog(`[mission] ${msg}`)
@@ -26,23 +25,24 @@ const log = (msg: string) => fileLog(`[mission] ${msg}`)
 export interface SessionHttpConfig {
   // The V2 SDK client (input.client in the plugin runtime). Used only for
   // the underlying transport's baseUrl when calling the opencode session
-  // API. Mission state itself lives in a local JSON file, so SDK methods
-  // are not used.
+  // API. Mission state itself is handled by the storage backend.
   v2Client: any
   // The plugin's working directory (input.directory). Canonical source for
   // the workspace path, used to namespace storage per project.
   directory: string
+  // Mission persistence backend (file or metadata). Required.
+  storage: MissionStorage
 }
 
 export interface SessionHttp {
   getSession(
     sessionID: string,
   ): Promise<{ id: string; parentID?: string; metadata: Record<string, unknown> } | null>
+  /** @deprecated delegate to the provided MissionStorage directly. */
   readMission(sessionID: string): Promise<Mission | null>
+  /** @deprecated delegate to the provided MissionStorage directly. */
   writeMission(sessionID: string, mission: Mission | null): Promise<void>
 }
-
-const STORAGE_DIR = join(homedir(), ".config", "opencode", "missions")
 
 // Project-isolate storage so two opencode projects do not collide.
 // The opencode runtime sends the workspace directory in the
@@ -75,33 +75,7 @@ function isHtmlResponse(text: string): boolean {
 }
 
 export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
-  const { v2Client, directory } = config
-
-  // Helpers that close over the per-plugin config. They live inside the
-  // factory (not at module level) so v2Client and directory resolve to
-  // the per-plugin instance, not to a TDZ error or an outer undefined.
-
-  function currentProjectSlug(): string {
-    // PluginInput.directory is the canonical workspace path. Fall back to
-    // SDK-derived values only if the PluginInput field is missing.
-    const v1 = v2Client?._client
-    const v1Headers = v1?.getConfig?.()?.headers as Record<string, string> | undefined
-    const v2Headers = v2Client?.getConfig?.()?.headers as Record<string, string> | undefined
-    const raw =
-      directory ??
-      v1Headers?.["x-opencode-directory"] ??
-      v2Headers?.["x-opencode-directory"] ??
-      (v1?.getConfig?.() as any)?.directory ??
-      (v2Client?.getConfig?.() as any)?.directory
-    if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-      log(`projectSlug raw=${raw}`)
-    }
-    return projectSlug(raw)
-  }
-
-  function missionPath(sessionID: string): string {
-    return join(STORAGE_DIR, currentProjectSlug(), `${sessionID}.json`)
-  }
+  const { v2Client, storage } = config
 
   function clientHeaders(): Record<string, string> {
     const v1 = v2Client?._client
@@ -158,51 +132,15 @@ export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
     }
   }
 
+  // Thin compatibility shims. Callers should prefer MissionStorage
+  // directly in new code; these are kept so existing MissionStore and
+  // hook call sites do not need to be touched in this refactor.
   async function readMission(sessionID: string): Promise<Mission | null> {
-    const file = missionPath(sessionID)
-    if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-      log(`READ ${file}`)
-    }
-    try {
-      const text = await readFile(file, "utf8")
-      return JSON.parse(text) as Mission
-    } catch (err: any) {
-      if (err?.code === "ENOENT") {
-        if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-          log(`READ miss (no file)`)
-        }
-        return null
-      }
-      log(`READ FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`)
-      throw err
-    }
+    return storage.read(sessionID)
   }
 
   async function writeMission(sessionID: string, mission: Mission | null): Promise<void> {
-    const file = missionPath(sessionID)
-    if (mission === null) {
-      // Cancellation: best-effort delete; missing file is fine
-      if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-        log(`DELETE ${file}`)
-      }
-      try {
-        await unlink(file)
-      } catch (err: any) {
-        if (err?.code !== "ENOENT") {
-          log(`DELETE FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`)
-        }
-      }
-      return
-    }
-    const tmp = `${file}.tmp`
-    if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-      log(`WRITE ${file}`)
-    }
-    await mkdir(dirname(file), { recursive: true })
-    await writeFile(tmp, JSON.stringify(mission, null, 2), "utf8")
-    // Atomic on POSIX, mostly atomic on Windows. If the target exists the
-    // rename overwrites it, so concurrent readers always see a complete file.
-    await rename(tmp, file)
+    return storage.write(sessionID, mission)
   }
 
   return { getSession, readMission, writeMission }
@@ -215,5 +153,9 @@ export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
 export function extractV1Client(inputClient: unknown): any {
   return (inputClient as any)?._client
 }
+
+// Re-export the slug helper so unit tests can verify the path layout
+// without importing the storage module.
+export const __test__ = { projectSlug }
 
 

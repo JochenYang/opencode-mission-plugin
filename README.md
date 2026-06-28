@@ -23,7 +23,7 @@
 | **状态自适应 system prompt** | `<mission_status>` 块 + 动态命令列表 + 3-turn 提醒 + wrap-up 指令          |
 | **自我批判**         | 每 turn 续跑 prompt + system 都强制 4 维自检                              |
 | **中断语义**         | 用户 Esc → `paused`（冻结 wallclock）/ runtime error → `blocked`           |
-| **自管 JSON 存储**   | `~/.config/opencode/missions/<workspace>/<sessionID>.json`，跨端（Windows / macOS / Linux），跨项目隔离 |
+| **可插拔存储**   | 默认自管 JSON（`~/.config/opencode/missions/<workspace>/<sessionID>.json`），可切换到 opencode session metadata（需 1.18+） |
 
 ## 安装
 
@@ -175,11 +175,37 @@ opencode
 - mission-verify 子智能体会被调度
 - mission 完成后 `GetMission` 返回 "No active mission"
 
+## 存储后端
+
+默认模式是自管 JSON 文件（见下方路径），不依赖任何 opencode 版本。如果你用的是 opencode 1.18+ 且希望 mission 随 session fork 一起自动继承，可以切换到 session metadata 模式：
+
+```bash
+# 默认（0.2.x 行为，所有 opencode 版本可用）
+unset OPENCODE_MISSION_STORAGE
+
+# 可选：把 mission 存进 opencode session 的 metadata 字段
+# 优点：fork session 时自动继承、集中备份、不占额外磁盘
+# 依赖：opencode 1.18+ 且 /session/:id PATCH 端点可用
+export OPENCODE_MISSION_STORAGE=metadata
+```
+
+| 模式 | 存储位置 | 依赖 | Fork 继承 |
+|------|----------|------|----------|
+| `file`（默认） | `~/.config/opencode/missions/<workspace>/<sessionID>.json` | 无 | 否（需手动调续命 API） |
+| `metadata` | `Session.metadata.mission`（走 `PATCH /session/:id`） | opencode 1.18+ | 是（服务器自动复制父 session metadata 到子 session） |
+
+**切换是即时生效的**（启动时读 env）。两种模式互不污染：同 session 切换存储后，老 mission 在旧存储里不动，新 mission 写到新存储。
+
+**踩坑提示**：
+- metadata 模式在 PATCH 失败时会**直接报错**（不静默 fallback 到 file），避免你在调试时怀疑「为什么 metadata 没存进去」却仍然在 file 里看到 mission
+- 如果你要在 fork session 后继续原 mission，记得从父 session ID 取 mission（不是从 fork 出的新 session ID）
+
 ## 已知限制
 
 - **续跑 + 中断追踪依赖 `EventSessionIdle`**：交互 TUI 实测可用；`opencode run`（headless）模式不发送此事件
 - **verify JSON 解析** 依赖子智能体严格输出 `\`\`\`json { verdict, scores } \`\`\`` 块；解析失败走 fail-open 兜底（标 `judgeFailed: true` 强制 mark complete，避免用户被困）
 - **Sub-agent 路由** 调 `getSession` 走 `globalThis.fetch`，opencode 1.17.x 跨进程网络隔离可能阻；当前 fallback 返回 `null`（主流程无影响）
+- **metadata 模式跨 workspace 共享**：metadata 跟随 session，不隔离 workspace；mission 本身就是单 workspace 概念，不是退化
 
 ## 开发
 

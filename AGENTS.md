@@ -45,6 +45,17 @@ opencode-mission/
 
 ## Design highlights
 
+### 0. Storage backends (pluggable)
+
+Mission persistence is handled by the `MissionStorage` interface (`src/mission-storage.ts`). The plugin ships two implementations:
+
+- `FileMissionStorage` (default, mode=`file`): JSON files at `~/.config/opencode/missions/<workspace-slug>/<sessionID>.json` with atomic temp-file renames. Self-contained; works with any opencode version. This is the behavior the plugin has had since v0.2.0 and the on-disk layout is a public contract.
+- `MetadataMissionStorage` (opt-in, mode=`metadata`): PATCHes the opencode session's metadata JSON column (`Session.metadata.mission`) via the canonical `PATCH /session/:sessionID` endpoint that returned in 1.18+. Pros: free session-fork inheritance (the forked session gets the parent's metadata copied automatically by the server), centralized backup with the rest of the user's opencode data, no extra filesystem footprint. Cons: requires opencode 1.18+ with a working PATCH endpoint; on older versions or sandboxed deployments the PATCH call returns non-2xx and the storage layer throws (we do NOT silently fall back to file — see constraint #8).
+
+Selection happens at plugin boot from `OPENCODE_MISSION_STORAGE` (default `file`). The factory in `mission-storage.ts` is the only entry point. `SessionHttp` keeps the legacy `readMission` / `writeMission` methods as thin shims that delegate to the provided storage, so existing call sites in `MissionStore`, hooks, and tools did not need to change in this refactor — but new code should depend on `MissionStorage` directly.
+
+To add a third backend: implement the `MissionStorage` interface (three methods: `read`, `write`, optional `healthCheck`), export a new factory in `mission-storage.ts`, and add a value to the `StorageMode` union. Tests in `tests/mission-storage.test.ts` show the contract.
+
 ### 1. State machine
 
 `active / paused / blocked / budget_limited / complete` (5 states):
@@ -180,12 +191,13 @@ Rules: one `bash` call per command; start dev servers in the background with exp
 ## Important constraints
 
 1. **DO NOT** modify `mission-store.ts:assertTransition` without updating `DESIGN.md §2` (state transition table).
-2. **DO NOT** revert `utils/session-http.ts` to V1 HeyApi client PATCH — the opencode 1.17.x server removed the metadata PATCH endpoint; the file-based JSON storage at `~/.config/opencode/missions/<workspace>/<sessionID>.json` is the only reliable persistence path. Mission state is owned by this plugin, not by opencode server metadata.
-3. **DO NOT** change the storage directory layout without a migration plan — the file path `<workspace-slug>/<sessionID>.json` is part of the public contract (it lives on the user's filesystem).
+2. **DO NOT** bypass the `MissionStorage` abstraction. Persistence is now pluggable: the default `FileMissionStorage` writes JSON to `~/.config/opencode/missions/<workspace>/<sessionID>.json` (the public on-disk contract), and `MetadataMissionStorage` (opt-in via `OPENCODE_MISSION_STORAGE=metadata`) persists inside the opencode session's metadata column. `SessionHttp` only handles session-info lookup (parentID, metadata read), not mission persistence. Adding a new storage backend means implementing the `MissionStorage` interface in `src/mission-storage.ts`.
+3. **DO NOT** change the file-based storage directory layout without a migration plan — the file path `<workspace-slug>/<sessionID>.json` is part of the public contract (it lives on the user's filesystem) and the default `FileMissionStorage` is what most users will keep using.
 4. **DO NOT** introduce `as any` in tool code; use `ctx.agent` to distinguish main vs sub.
 5. **DO NOT** leak `terminalReason` into the continuation prompt (it goes in the system injection, the continuation prompt stays clean).
 6. **DO NOT** remove the ABSOLUTE RULE from `command-template.ts` — without it, agents skip `CreateMission` and the entire plugin stays inert.
 7. **DO NOT** relax the bash protocol — chained `;` commands and detached `Start-Process` are the two main causes of stuck turns.
+8. **DO NOT** silently fall back from `MetadataMissionStorage` to file storage. A PATCH failure should surface as a hard error so operators notice the misconfiguration; if you want a soft fallback you have to do it explicitly in the storage backend (and document it).
 
 ## Verification checklist
 
