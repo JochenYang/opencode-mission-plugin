@@ -8,22 +8,22 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![GitHub stars](https://img.shields.io/github/stars/JochenYang/opencode-mission-plugin?style=flat-square)](https://github.com/JochenYang/opencode-mission-plugin)
 
-一个 OpenCode 插件，给主会话加"自主目标模式"：主人定一个目标，agent 跨多个 turn 自主工作直到目标完成、暂停或阻塞。
+一个 OpenCode 插件，给主会话加"自主目标模式"：用户定一个目标，agent 跨多个 turn 自主工作直到目标完成、暂停或阻塞。
 
 ## 核心特性
 
-| 特性                | 说明                                                                |
-| ------------------- | ------------------------------------------------------------------- |
-| **5 态状态机**       | `active / paused / blocked / budget_limited / complete`，区分用户主动 / 系统限制 / 自主阻塞 |
-| **3 维度预算**       | `turn / token / wallclock`，可独立设上限；超限自动转 `budget_limited` 而非 `blocked` |
-| **3-turn block 阈值** | agent 自主声明 blocked 需连续 3 次同因（防误判）                            |
-| **judge react cap**  | 验证连续 5 次失败自动 budget_limited（防 verify 死循环）                       |
-| **4 个独立工具**     | `CreateMission` / `UpdateMission` / `GetMission` / `SetMissionBudget` |
-| **独立 verify 子智能体** | 4 维评分（completeness/correctness/integration/robustness） → 自动 mark complete |
-| **状态自适应 system prompt** | `<mission_status>` 块 + 动态命令列表 + 3-turn 提醒 + wrap-up 指令          |
-| **自我批判**         | 每 turn 续跑 prompt + system 都强制 4 维自检                              |
-| **中断语义**         | 用户 Esc → `paused`（冻结 wallclock）/ runtime error → `blocked`           |
-| **自管 JSON 存储**   | `~/.config/opencode/missions/<workspace>/<sessionID>.json`，跨端（Windows / macOS / Linux），跨项目隔离 |
+| 特性                         | 说明                                                                                                              |
+|------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| **5 态状态机**               | `active / paused / blocked / budget_limited / complete`，区分用户主动 / 系统限制 / 自主阻塞                        |
+| **3 维度预算**               | `turn / token / wallclock`，可独立设上限；超限自动转 `budget_limited` 而非 `blocked`                                |
+| **3-turn block 阈值**        | agent 自主声明 blocked 需连续 3 次同因（防误判）                                                                    |
+| **judge react cap**          | 验证连续 5 次失败自动 budget_limited（防 verify 死循环）                                                            |
+| **4 个独立工具**             | `CreateMission` / `UpdateMission` / `GetMission` / `SetMissionBudget`                                             |
+| **独立 verify 子智能体**     | 4 维评分（completeness/correctness/integration/robustness） → 自动 mark complete                                    |
+| **状态自适应 system prompt** | `<mission_status>` 块 + 动态命令列表 + 3-turn 提醒 + wrap-up 指令                                                 |
+| **自我批判**                 | 每 turn 续跑 prompt + system 都强制 4 维自检                                                                      |
+| **中断语义**                 | 用户 Esc → `paused`（冻结 wallclock）/ runtime error → `blocked`                                                    |
+| **可插拔存储**               | 默认自管 JSON（`~/.config/opencode/missions/<workspace>/<sessionID>.json`），可切换到 opencode session metadata 模式 |
 
 ## 安装
 
@@ -106,12 +106,12 @@ Agent 收到命令后会**强制**：
 
 ## 工具一览
 
-| 工具                | 主会话 | 子智能体 | 用途                                                       |
-| ------------------- | ------ | -------- | ---------------------------------------------------------- |
-| `CreateMission`     | ✅     | ❌        | 创建 mission（必填 `objective` + `completionCriterion`）  |
-| `UpdateMission`     | ✅     | ❌        | 状态转移：`active / paused / blocked / cancelled`            |
-| `GetMission`        | ✅     | ✅（读父）| 读取当前 mission 状态                                       |
-| `SetMissionBudget`  | ✅     | ❌        | 调整预算上限（一次一个维度）                                |
+| 工具               | 主会话 | 子智能体 | 用途                                                   |
+|--------------------|--------|----------|--------------------------------------------------------|
+| `CreateMission`    | ✅      | ❌        | 创建 mission（必填 `objective` + `completionCriterion`） |
+| `UpdateMission`    | ✅      | ❌        | 状态转移：`active / paused / blocked / cancelled`       |
+| `GetMission`       | ✅      | ✅（读父）  | 读取当前 mission 状态                                  |
+| `SetMissionBudget` | ✅      | ❌        | 调整预算上限（一次一个维度）                             |
 
 ## 验证机制
 
@@ -156,7 +156,7 @@ agent 在 PowerShell-on-Windows shell 里跑，**避免这些**：
       Stop-Process -Force -ErrorAction SilentlyContinue
   ```
 
-## 测试（主人晚上回来用）
+## 测试（自动化对照表）
 
 启动 opencode TUI：
 
@@ -174,6 +174,20 @@ opencode
 - agent 第一个工具调用应是 `CreateMission`
 - mission-verify 子智能体会被调度
 - mission 完成后 `GetMission` 返回 "No active mission"
+
+## 存储
+
+Mission 状态直接存在 opencode session 的 metadata 列（走 `PATCH /session/:sessionID`）。**需要 opencode >= 1.17.11**（端点在该版本起可用）。
+
+存进 metadata 的两个收益（白送）：
+
+- **Session fork 自动继承**——opencode 服务端在 fork session 时自动复制 parent 的 `Session.metadata` 到 child。子 session 立刻能看到原 mission，无需 plugin 端任何逻辑
+- **集中备份**——跟用户其他 opencode 数据（session、message 等）一起走 SQLite 备份，不用单独备份 mission 文件
+
+**踩坑提示**：
+
+- 如果你在 fork session 后想继续原 mission，记得从**父 session ID** 取 mission（不是从 fork 出的新 session ID）
+- 老的 `OPENCODE_MISSION_STORAGE=file` 模式已经移除（0.3.0 起）
 
 ## 已知限制
 

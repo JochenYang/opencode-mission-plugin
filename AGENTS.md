@@ -1,6 +1,6 @@
 # AGENTS.md · Project notes for future maintainers
 
-> Written by Aya for the user and any agent that picks up this project.
+> Notes for anyone (human or agent) picking up this project.
 
 ## One-line summary
 
@@ -14,6 +14,7 @@ opencode-mission/
 │   ├── index.ts                  # Entry point: hook wiring
 │   ├── types.ts                  # Type definitions (Mission, Budget, Status, Actor, VerificationReport)
 │   ├── mission-store.ts          # State machine + budget accumulation + persistence (the only mutation entry point)
+│   ├── mission-storage.ts        # MissionStorage interface + MetadataMissionStorage (PATCH /session/:id)
 │   ├── command-template.ts       # /mission command template + ABSOLUTE RULE + bash protocol
 │   ├── prompts.ts                # Continuation prompt + 4-dim self-audit
 │   ├── prompts-injection.ts      # 3-level system prompt injection + self-audit
@@ -31,7 +32,7 @@ opencode-mission/
 │   │   ├── verify-prompt.ts      # Verify subagent system prompt
 │   │   └── verify-context.ts     # Subagent context injection template
 │   └── utils/
-│       ├── session-http.ts       # File-based mission storage + raw fetch for sub-agent routing
+│       ├── session-http.ts       # Session info lookup (parentID) for sub-agent routing
 │       └── format.ts             # Formatting helpers (duration, number, status output)
 ├── dist/
 │   └── index.js                  # Built single-file bundle (~56 KB)
@@ -44,6 +45,21 @@ opencode-mission/
 ```
 
 ## Design highlights
+
+### 0. Storage
+
+Mission persistence is handled by the `MissionStorage` interface (`src/mission-storage.ts`). The only implementation is `MetadataMissionStorage`: it PATCHes the opencode session's metadata JSON column (`Session.metadata.mission`) via the canonical `PATCH /session/:sessionID` endpoint.
+
+Why this approach:
+- **Free session-fork inheritance**: when a session is forked, the opencode server copies the parent's `Session.metadata` into the child automatically. The new session already has the mission — no plugin-side wiring.
+- **Centralized backup**: mission state rides along with the rest of the user's opencode data (sessions, messages, etc.) in the SQLite store. No separate mission file to back up.
+- **No extra filesystem footprint**: the mission lives where the session lives.
+
+Requires opencode >= 1.17.11 (the PATCH endpoint has shipped there). On builds that don't expose the endpoint, write() throws — operators who need a workaround should upgrade opencode. There is no silent fallback; hiding PATCH failures would corrupt the user's workflow.
+
+The factory in `mission-storage.ts` is the only entry point. `SessionHttp` keeps the legacy `readMission` / `writeMission` methods as thin shims that delegate to the storage, so existing call sites in `MissionStore`, hooks, and tools did not need to change. New code should depend on `MissionStorage` directly.
+
+To add a different backend: implement the `MissionStorage` interface (three methods: `read`, `write`, optional `healthCheck`), export a new factory in `mission-storage.ts`. Tests in `tests/mission-storage.test.ts` show the contract.
 
 ### 1. State machine
 
@@ -71,16 +87,12 @@ Runtime errors (`actor="runtime"`) still block immediately — no threshold.
 
 ### 3. Persistence
 
-The plugin owns mission state as JSON files under the user's config dir, decoupling from opencode server metadata APIs:
+Mission state lives inside the opencode session's metadata column at `Session.metadata.mission`. The plugin does not own any on-disk layout — the opencode server does (SQLite).
 
-```
-~/.config/opencode/missions/<workspace-slug>/<sessionID>.json
-```
-
-- Path built with `os.homedir() + path.join()` (cross-platform: Windows, macOS, Linux).
-- Workspace slug is sanitized from `PluginInput.directory` (URL-decoded, path separators replaced with `-`).
-- Atomic writes: write to `<file>.tmp`, then `rename` to `<file>` (POSIX atomic, Windows close-to-atomic).
-- Sub-agent routing uses raw `fetch` to `/api/session/{id}` (the 1.17.x canonical path) to find the parent session ID; falls back to a "no parent" sentinel if unreachable.
+- Set via `PATCH /session/:sessionID` with body `{ metadata: { ...currentMetadata, mission } }` (merge preserves sibling keys written by other plugins).
+- Read via `GET /session/:sessionID` then `data.metadata.mission`.
+- Sub-agent routing uses raw `fetch` to `/api/session/{id}` (the 1.17.x canonical path; the V2 SDK's `client.session.get()` has a `{sessionID}` template-substitution bug). Returns `null` if the plugin process is sandboxed away from the server; the main flow continues safely.
+- v0.2.x owned mission state in JSON files at `~/.config/opencode/missions/<workspace-slug>/<sessionID>.json`. Removed in 0.3.0 once the metadata PATCH endpoint shipped in opencode 1.17.11 — file mode had no fork inheritance, no centralized backup, and a duplicate on-disk layout to maintain.
 
 The V2 SDK's `session.get()` method has a path-template substitution bug in 1.17.1 (sends literal `{id}` to the server, gets 500), so we use raw `fetch` instead.
 
@@ -180,12 +192,13 @@ Rules: one `bash` call per command; start dev servers in the background with exp
 ## Important constraints
 
 1. **DO NOT** modify `mission-store.ts:assertTransition` without updating `DESIGN.md §2` (state transition table).
-2. **DO NOT** revert `utils/session-http.ts` to V1 HeyApi client PATCH — the opencode 1.17.x server removed the metadata PATCH endpoint; the file-based JSON storage at `~/.config/opencode/missions/<workspace>/<sessionID>.json` is the only reliable persistence path. Mission state is owned by this plugin, not by opencode server metadata.
-3. **DO NOT** change the storage directory layout without a migration plan — the file path `<workspace-slug>/<sessionID>.json` is part of the public contract (it lives on the user's filesystem).
+2. **DO NOT** bypass the `MissionStorage` abstraction. Mission state lives inside the opencode session's metadata column (`Session.metadata.mission`) via `PATCH /session/:sessionID`. `SessionHttp` only handles session-info lookup (parentID, metadata read), not mission persistence. Adding a new storage backend means implementing the `MissionStorage` interface in `src/mission-storage.ts`.
+3. **DO NOT** reintroduce a file-based storage backend. Mission state lives inside the opencode session's metadata column on purpose — file mode was removed in 0.3.0 because it had no fork inheritance, no centralized backup, and a duplicate on-disk layout to maintain. If you genuinely need a file backend for a specific environment, document the reason in a PR and update this constraint.
 4. **DO NOT** introduce `as any` in tool code; use `ctx.agent` to distinguish main vs sub.
 5. **DO NOT** leak `terminalReason` into the continuation prompt (it goes in the system injection, the continuation prompt stays clean).
 6. **DO NOT** remove the ABSOLUTE RULE from `command-template.ts` — without it, agents skip `CreateMission` and the entire plugin stays inert.
 7. **DO NOT** relax the bash protocol — chained `;` commands and detached `Start-Process` are the two main causes of stuck turns.
+8. **DO NOT** silently swallow metadata-storage errors. A `PATCH` failure should surface as a hard error so operators notice the misconfiguration; if you want a soft fallback you have to do it explicitly in the storage backend (and document it).
 
 ## Verification checklist
 
@@ -200,7 +213,7 @@ A task is "done" only when all of the following pass:
 - [ ] `/mission budget set turns=2` followed by enough work causes the mission to transition to `budget_limited` (not `blocked`)
 - [ ] User Esc during autonomous work -> mission transitions to `paused`; `/mission resume` re-activates and wallclock resumes from where it was frozen
 - [ ] A non-`mission-verify` subagent calling `UpdateMission` receives the "not authorized" error
-- [ ] Mission state persists across opencode server restarts (file-based storage at `~/.config/opencode/missions/<workspace>/<sessionID>.json`)
+- [ ] Mission state persists across opencode server restarts (stored in the opencode session's metadata column at `Session.metadata.mission`)
 
 ## Known limitations
 
@@ -209,11 +222,11 @@ A task is "done" only when all of the following pass:
 3. **Token accumulation** — depends on `EventMessageUpdated` carrying `AssistantMessage.tokens`. If opencode changes this field shape, accumulation may break.
 4. **Continuation in headless mode** — the `event` hook has not been observed receiving `session.idle` events during `opencode run` (headless) testing. The mechanism is structurally correct but should be validated in interactive TUI mode where the user can press Esc and observe pause behavior.
 5. **Sub-agent routing on opencode 1.17.x** — `getSession` uses raw `fetch` to `/api/session/{id}` (the canonical 1.17.x path; V2 SDK has a `{sessionID}` template-substitution bug). On 1.17.x the plugin process may be sandboxed away from the server, in which case `getSession` returns null and the main flow continues safely (sub-agent routing falls back to a "no parent" sentinel).
-6. **Single mission per session** — the JSON file schema allows extension to a `missionsPro: Mission[]` array for parallel missions; not implemented in v1.
+6. **Single mission per session** — the metadata column holds one `mission` key; a future `missions[]` array would let multiple missions share a session.
 
 ## Future work (v2+)
 
-- Multi-mission parallel execution (extend the JSON file schema to a `missions: Mission[]` array per session).
+- Multi-mission parallel execution (extend the metadata schema to a `missions: Mission[]` array per session).
 - Budget pool (multiple missions sharing a token budget).
 - Verify report visualization (custom TUI panel).
 - Status change notifications via `EventTuiToastShow`.

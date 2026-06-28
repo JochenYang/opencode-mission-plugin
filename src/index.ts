@@ -15,6 +15,7 @@ import type { Plugin, PluginModule, PluginInput, Hooks } from "@opencode-ai/plug
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { MissionStore } from "./mission-store.js"
 import { createSessionHttp, extractV1Client } from "./utils/session-http.js"
+import { createMissionStorage } from "./mission-storage.js"
 import { createMissionTool } from "./tools/create-mission.js"
 import { updateMissionTool } from "./tools/update-mission.js"
 import { getMissionTool } from "./tools/get-mission.js"
@@ -32,11 +33,26 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
   // The plugin runtime injects a V2 SDK client (input.client). We use its
   // session.get() for parent-session lookups (for sub-agent routing) and
   // its fetch + headers via getConfig() when constructing a sibling client
-  // for promptAsync. Mission state itself lives in a local JSON file
-  // (see session-http.ts) so we do not depend on the session metadata
-  // endpoint, which was removed in 1.17.x.
+  // for promptAsync. Mission state lives inside the opencode session's
+  // metadata column (see mission-storage.ts).
   const v1Client = extractV1Client(input.client)
-  const http = createSessionHttp({ v2Client: input.client, directory: input.directory })
+
+  const v1Headers = v1Client?.getConfig?.()?.headers as Record<string, string> | undefined
+  const storage = createMissionStorage({
+    baseUrl: input.serverUrl.origin,
+    headers: v1Headers,
+  })
+  if (process.env.OPENCODE_MISSION_DEBUG === "1") {
+    log(`mission storage mode=${storage.mode}`)
+  }
+  // Kick off a non-fatal health check so config mistakes surface in the log
+  storage.healthCheck?.().then((h) => {
+    if (!h.ok) log(`mission storage health check failed: ${h.detail ?? "unknown"}`)
+  })
+
+  const http = createSessionHttp({
+    v2Client: input.client,
+  })
 
   // A second V2 client instance for promptAsync; the SDK's promptAsync lives
   // on its session namespace and uses the same transport.
@@ -45,7 +61,7 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
     headers: v1Client?.getConfig?.()?.headers,
     fetch: v1Client?.getConfig?.()?.fetch,
   })
-  const store = new MissionStore(http)
+  const store = new MissionStore(storage, http)
 
   // Tool registration
   const createTool = createMissionTool(store)

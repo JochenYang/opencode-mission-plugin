@@ -23,7 +23,7 @@ An OpenCode plugin that adds an autonomous mission-driven agent mode: the user s
 | **Status-adaptive system prompt** | `<mission_status>` block + dynamic commands + 3-turn reminder + wrap-up directive |
 | **Self-audit**                 | Every turn's continuation prompt + system prompt force a 4-dim self-check       |
 | **Interrupt semantics**        | User Esc → `paused` (wallclock frozen) / runtime error → `blocked`              |
-| **Self-managed JSON storage**  | `~/.config/opencode/missions/<workspace>/<sessionID>.json`, cross-platform (Windows / macOS / Linux), per-project isolation |
+| **Pluggable storage**  | Default: self-managed JSON at `~/.config/opencode/missions/<workspace>/<sessionID>.json`. Optional: opencode session metadata mode |
 
 ## Installation
 
@@ -176,11 +176,24 @@ Then in the TUI prompt:
 - mission-verify subagent gets spawned
 - mission auto-completes; `GetMission` returns "No active mission"
 
+## Storage
+
+Mission state lives directly inside the opencode session's metadata column (via `PATCH /session/:sessionID`). **Requires opencode >= 1.17.11** (the PATCH endpoint has shipped there).
+
+Two free side benefits:
+
+- **Session fork inheritance** — when a session is forked, the opencode server copies the parent's `Session.metadata` into the child automatically. The new session already has the mission, no plugin wiring required.
+- **Centralized backup** — mission state rides along with the rest of the user's opencode data (sessions, messages, etc.) in the SQLite store, no separate mission file to back up.
+
+**Gotchas**:
+
+- If you fork a session and want the new session to keep the mission, read from the **parent** session's ID (not the fork's own ID).
+- The old `OPENCODE_MISSION_STORAGE=file` mode has been removed as of 0.3.0.
+
 ## Known limitations
 
 - **Continuation + interrupt tracking depends on `EventSessionIdle`**: works in interactive TUI; `opencode run` (headless) does not emit this event.
 - **Verify JSON parsing** depends on the subagent emitting a strict `\`\`\`json { verdict, scores } \`\`\`` block.
-- **Storage** is self-managed JSON files at `~/.config/opencode/missions/<workspace>/<sessionID>.json`, with atomic writes (temp + rename). Per-project isolation via sanitized workspace slugs.
 - **Sub-agent routing** uses `globalThis.fetch` to call `/api/session/{id}`. On opencode 1.17.x the plugin process may be sandboxed away from the server; the fallback returns `null` which is safe for the main flow (sub-agent routing becomes a known limitation).
 
 ## Development

@@ -1,6 +1,6 @@
 # Testing Guide
 
-> 主人晚上回来用这个文件照着测。
+> 自动化对照表：每个测试对应一个观察项，跑完可以照着勾。
 
 ## 0. 关键概念：预算完全可选
 
@@ -58,7 +58,7 @@ opencode
 
 ## 4. 测试 2: 续跑 + budget 边界（中等任务，**带预算**）
 
-> 这一节是测试**设了预算后**的行为。如果主人不设预算，下面的 "budget 耗尽" 观察项不适用。
+> 这一节是测试**设了预算后**的行为。如果不设预算，下面的 "budget 耗尽" 观察项不适用。
 
 ```
 /mission 在 `demo-long/` 目录创建一个 Node.js API：1) Express + TypeScript；2) /api/users 返回 mock 用户列表；3) /api/users/:id 返回单个用户；4) 4+ 个测试用 vitest 全通过；5) tsc --noEmit 无错误。完成标准：vitest 全 pass；tsc 无错误；curl http://localhost:3001/api/users 返回 200
@@ -121,11 +121,11 @@ opencode
 
 ## 10. 报告问题
 
-如果出问题，主人贴回：
+如果出问题，请贴回：
 
 1. **截图**（TUI 或 log）
 2. **mission 状态**（`/mission status` 输出）
 3. **agent 第一个工具调用**（应该在 log 里）
 4. **最终 `GetMission` 返回**
 
-阿亚酱据此定位是 plugin bug / opencode 限制 / agent 行为问题。
+据此定位是 plugin bug / opencode 限制 / agent 行为问题。
