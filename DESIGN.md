@@ -13,7 +13,7 @@
 | Prompt injection       | 4 状态自适应 system 注入 + 动态命令列表 + wrap-up 指令            |
 | Interrupt semantics    | user Esc -> `paused` (wallclock frozen), runtime error -> `blocked` |
 | Verification           | 4-dimension structured scoring + JSON report (with fail-open)       |
-| Storage                | Self-managed JSON file at `~/.config/opencode/missions/<workspace>/<sessionID>.json` |
+| Storage                | `Session.metadata.mission` via `PATCH /session/:sessionID` (opencode 1.17.11+) |
 
 ## 2. State machine
 
@@ -57,7 +57,7 @@ Implementation: `src/mission-store.ts:assertTransition`.
 
 ## 3. Data model
 
-State lives in a JSON file at `~/.config/opencode/missions/<workspace-slug>/<sessionID>.json` (auto-managed by the plugin, not by opencode server metadata):
+State lives inside the opencode session's metadata column at `Session.metadata.mission` (set via `PATCH /session/:sessionID`). The plugin does not own the on-disk layout — the opencode server does, in its SQLite store:
 
 ```ts
 interface Mission {
@@ -96,33 +96,36 @@ Full schema in `src/types.ts`.
 
 ## 4. Persistence layer
 
-The plugin owns its own state. Mission reads/writes go through `src/utils/session-http.ts` which uses the file system, not the opencode server.
+Mission reads/writes go through `src/mission-storage.ts` → `MetadataMissionStorage`, which PATCHes `Session.metadata.mission` on the opencode server. The plugin does not own any on-disk layout for missions.
 
 ```ts
-const STORAGE_DIR = join(homedir(), ".config", "opencode", "missions")
-
-function missionPath(directory: string, sessionID: string): string {
-  return join(STORAGE_DIR, projectSlug(directory), `${sessionID}.json`)
-}
-
-await writeFile(`${path}.tmp`, JSON.stringify(mission, null, 2))
-await rename(`${path}.tmp`, path)  // atomic
+const resp = await fetch(`${baseUrl}/session/${sessionID}`, {
+  method: "PATCH",
+  headers: { "Content-Type": "application/json", ...authHeaders },
+  body: JSON.stringify({
+    metadata: { ...currentMetadata, mission },  // merge preserves sibling keys
+  }),
+})
 ```
 
-Why we moved off the opencode server API (1.17.x removed PATCH for arbitrary session metadata):
+Why metadata storage:
 
-- 1.16.x had `PATCH /session/{id}` with `body: { metadata: { missionPro: ... } }`. 1.17.x dropped this endpoint entirely (the session table only has typed columns; `metadata` is now a typed JSON column, not freely writable).
-- The V2 SDK's `client.session.get()` has a path-template substitution bug in 1.17.1 (sends literal `{id}` to the server, which 500s).
-- The V1 client's fetch wrapper has its own response-parsing bug (`v[0]` undefined) on raw calls.
+- `PATCH /session/:sessionID` is the canonical write path; opencode merges the metadata object server-side and copies it on fork (free session-fork inheritance).
+- Centralized backup: mission rides along with the rest of the user's opencode data in the opencode SQLite store.
+- No extra filesystem footprint beyond the session itself.
+- Cross-version path: the V2 SDK's `client.session.update({ sessionID, metadata })` compiles down to this PATCH.
 
-Path construction is cross-platform via `os.homedir() + path.join()`. Workspace is sanitized from `PluginInput.directory`. Storage key is `<workspace-slug>/<sessionID>.json`, namespaced per project.
+History:
+
+- v0.2.x used self-managed JSON files at `~/.config/opencode/missions/<workspace>/<sessionID>.json` because v0.2.x predated the metadata PATCH being reliable enough to depend on. That file mode was removed in 0.3.0 once the PATCH endpoint shipped in opencode 1.17.11.
+- The V2 SDK's `client.session.get()` has a path-template substitution bug in 1.17.1 (sends literal `{id}` to the server, which 500s). We sidestep that with raw `fetch` to the canonical `/api/session/:sessionID` path.
 
 ## 5. Tools
 
 | Tool                | Main session | Subagent (mission-verify) | Purpose                                                |
 | ------------------- | ------------ | -------------------------- | ------------------------------------------------------ |
 | `CreateMission`     | yes          | no                         | Create a new mission (requires `objective` + `completionCriterion`) |
-| `UpdateMission`     | yes          | no (only via verify)       | Transition status: `active / paused / blocked / cancelled` |
+| `UpdateMission`     | yes          | yes (only `complete` + `blocked`)       | Transition status: `active / paused / blocked / complete` (`complete` gated to verify subagent) |
 | `GetMission`        | yes          | yes (reads parent)         | Read current mission state                            |
 | `SetMissionBudget`  | yes          | no                         | Adjust budget limits (one dimension per call)          |
 
@@ -287,13 +290,13 @@ The plugin ships as a single JS file (~64 KB) with no external runtime dependenc
 - **Continuation + interrupt tracking depend on `EventSessionIdle`**: works in interactive TUI; `opencode run` (headless) does not emit this event so the mechanism is structurally correct but unvalidated in headless tests.
 - **Verify JSON parsing** depends on the subagent emitting a strict `\`\`\`json { verdict, scores } \`\`\`` block. Fail-open (a synthetic `judgeFailed: true` report) catches parse failures and marks complete to avoid trapping the user. A future version could replace the free-text parser with a structured tool emit.
 - **Wallclock precision** relies on `Date.now()`; subject to system clock adjustments.
-- **Single mission per session**: the JSON file schema allows extension to a `missions: Mission[]` array for parallel missions; not implemented in v1.
+- **Single mission per session**: the metadata column holds one `mission` key; a future `missions[]` array would let multiple missions share a session.
 - **Sub-agent routing on opencode 1.17.x**: `getSession` uses raw `fetch` to `/api/session/{id}` (the canonical 1.17.x path; the V2 SDK's `session.get()` has a path-template substitution bug in 1.17.1, sending literal `{id}` to the server). On 1.17.x the plugin process may be sandboxed away from the server, in which case `getSession` returns null and the main flow continues safely.
 - **HTML response guard** rejects SPA fallback bodies. If opencode ever routes `/session/{id}` style calls to a non-SPA endpoint, the guard still works because the response will be valid JSON.
 
 ## 15. Future work (v2+)
 
-- Multi-mission parallel execution (extend the JSON file schema to a `missions: Mission[]` array per session).
+- Multi-mission parallel execution (extend the metadata schema to a `missions: Mission[]` array per session).
 - Budget pool (multiple missions sharing a token budget).
 - Verify report visualization (custom TUI panel).
 - Status change notifications via `EventTuiToastShow`.
