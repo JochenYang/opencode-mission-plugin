@@ -2,18 +2,26 @@
 //  MissionStorage
 //
 // Single implementation: MetadataMissionStorage. Stores Mission records
-// inside the opencode session's typed metadata JSON column via
-// PATCH /session/:sessionID. Requires opencode >= 1.17.11 (the
-// PATCH endpoint has shipped there). Free side benefits:
+// inside the opencode session's typed metadata JSON column via the
+// opencode server's PATCH /session/:sessionID endpoint (V2 SDK's
+// session.update).
 //
-//   - Session fork inheritance: when a session is forked, the opencode
-//     server copies the parent's Session.metadata into the child
-//     automatically. The new session already has the mission.
-//   - Centralized backup with the rest of the user's opencode data
-//     (sessions live in SQLite, mission rides along).
-//   - No extra filesystem footprint beyond the session itself.
+// Why the V2 SDK (not raw fetch):
+//
+//   - The V2 SDK constructs the request URL from the same source as the
+//     server's route table, so the path is correct on every version.
+//   - The V1 client injects its own fetch (with auth, cookies, and the
+//     sandboxed transport that the plugin process can reach). Passing
+//     that fetch into the V2 client reuses the opencode-trusted socket
+//     path; raw `globalThis.fetch` is blocked in the plugin's sandbox.
+//   - Headers and content-type are wired up by the SDK.
+//
+// Requires opencode >= 1.17.11 (the PATCH endpoint has shipped there).
+// A PATCH failure surfaces as a hard error so the user notices —
+// silent fallback would hide a misconfiguration.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import type { Mission } from "./types.js"
 import { log } from "./utils/log.js"
 
@@ -24,7 +32,7 @@ export interface MissionStorage {
 
   /**
    * Read the Mission for a session. Returns null if no mission exists.
-   * Throws on hard network errors so the caller can surface them.
+   * Throws on hard transport errors so the caller can surface them.
    */
   read(sessionID: string): Promise<Mission | null>
 
@@ -40,107 +48,36 @@ export interface MissionStorage {
   healthCheck?(): Promise<{ ok: boolean; detail?: string }>
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  MetadataMissionStorage — uses opencode session metadata via PATCH API
-//
-// Strategy:
-//   1. On write: PATCH /session/:sessionID with body { metadata: { mission: M } }
-//      (or merge without mission key to clear). OpenCode merges into its
-//      typed JSON column.
-//   2. On read: GET /session/:sessionID and pull out metadata.mission.
-//   3. Fork inheritance: handled automatically by the opencode server
-//      when a session is forked — the child's metadata starts as a copy
-//      of the parent's.
-//
-// Failure mode: if the PATCH endpoint is unavailable (older opencode,
-// network error, server sandboxed), write() throws. There is no silent
-// fallback: mission state must round-trip through the server, and
-// hiding failures would corrupt the user's workflow.
-// ─────────────────────────────────────────────────────────────────────────────
+const DEFAULT_METADATA_KEY = "mission"
 
 export interface MetadataMissionStorageOptions {
-  baseUrl: string
-  headers: Record<string, string>
+  v2Client: ReturnType<typeof createOpencodeClient>
   /** Under which metadata key the mission is stored. Default: "mission". */
   metadataKey?: string
-  /** Override for tests. */
-  fetchImpl?: typeof fetch
-  /** HTTP timeout in ms. Default: 10000. */
-  timeoutMs?: number
 }
-
-const DEFAULT_METADATA_KEY = "mission"
 
 export class MetadataMissionStorage implements MissionStorage {
   readonly mode = "metadata" as const
-  private readonly baseUrl: string
-  private readonly headers: Record<string, string>
+  private readonly v2Client: ReturnType<typeof createOpencodeClient>
   private readonly key: string
-  private readonly fetchImpl: typeof fetch
-  private readonly timeoutMs: number
 
   constructor(opts: MetadataMissionStorageOptions) {
-    this.baseUrl = opts.baseUrl.replace(/\/+$/, "")
-    this.headers = { ...opts.headers }
+    this.v2Client = opts.v2Client
     this.key = opts.metadataKey ?? DEFAULT_METADATA_KEY
-    this.fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis)
-    this.timeoutMs = opts.timeoutMs ?? 10_000
   }
 
-  private sessionUrl(sessionID: string): string {
-    // 1.17.x canonical session path: /api/session/:sessionID. The V2 SDK
-    // uses /session/{sessionID} (no /api prefix) but raw fetch must use
-    // the /api prefix the server actually serves.
-    return `${this.baseUrl}/api/session/${encodeURIComponent(sessionID)}`
-  }
-
-  private async getSessionMetadata(sessionID: string): Promise<Record<string, unknown> | null> {
-    const url = this.sessionUrl(sessionID)
-    const ac = new AbortController()
-    const timer = setTimeout(() => ac.abort(), this.timeoutMs)
-    try {
-      const resp = await this.fetchImpl(url, {
-        method: "GET",
-        headers: this.headers,
-        signal: ac.signal,
-      })
-      if (!resp.ok) return null
-      const text = await resp.text()
-      if (text.trimStart().slice(0, 64).toLowerCase().startsWith("<")) return null // HTML guard
-      const data = JSON.parse(text)
-      return (data?.metadata ?? {}) as Record<string, unknown>
-    } catch (err: any) {
-      log(`[mission-storage] GET FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`)
-      return null
-    } finally {
-      clearTimeout(timer)
-    }
-  }
-
-  private async patchSessionMetadata(
+  private async getSessionMetadata(
     sessionID: string,
-    next: Record<string, unknown>,
-  ): Promise<boolean> {
-    const url = this.sessionUrl(sessionID)
-    const ac = new AbortController()
-    const timer = setTimeout(() => ac.abort(), this.timeoutMs)
+  ): Promise<Record<string, unknown> | null> {
     try {
-      const resp = await this.fetchImpl(url, {
-        method: "PATCH",
-        headers: { ...this.headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ metadata: next }),
-        signal: ac.signal,
-      })
-      if (!resp.ok) {
-        log(`[mission-storage] PATCH FAIL sessionID=${sessionID} status=${resp.status}`)
-        return false
-      }
-      return true
+      const result = await this.v2Client.session.get({ sessionID })
+      const data = (result as any)?.data
+      return ((data?.metadata ?? {}) as Record<string, unknown>)
     } catch (err: any) {
-      log(`[mission-storage] PATCH FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`)
-      return false
-    } finally {
-      clearTimeout(timer)
+      log(
+        `GET FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`,
+      )
+      return null
     }
   }
 
@@ -174,20 +111,26 @@ export class MetadataMissionStorage implements MissionStorage {
     } else {
       next[this.key] = mission
     }
-    const ok = await this.patchSessionMetadata(sessionID, next)
-    if (!ok) {
+    let error: any = null
+    try {
+      const result = await this.v2Client.session.update({
+        sessionID,
+        metadata: next,
+      })
+      error = (result as any)?.error ?? null
+    } catch (err: any) {
+      error = err
+    }
+    if (error) {
       throw new Error(
-        `MetadataMissionStorage: PATCH /api/session/${sessionID} failed; ` +
-          `mission state could not be persisted. Check opencode server logs.`,
+        `MetadataMissionStorage: session.update failed for ${sessionID}: ` +
+          (error?.message ?? JSON.stringify(error)),
       )
     }
   }
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
-    // No-op probe: we can only validate at write time because the server
-    // does not expose a metadata ping. A malformed baseUrl throws during
-    // path computation, not here.
-    return { ok: true, detail: `${this.baseUrl} key=${this.key}` }
+    return { ok: true, detail: "V2 SDK session.update" }
   }
 }
 
@@ -196,19 +139,9 @@ export class MetadataMissionStorage implements MissionStorage {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface StorageConfig {
-  baseUrl: string
-  headers?: Record<string, string>
+  v2Client: ReturnType<typeof createOpencodeClient>
 }
 
 export function createMissionStorage(config: StorageConfig): MissionStorage {
-  if (!config.baseUrl) {
-    throw new Error(
-      "createMissionStorage requires baseUrl; " +
-        "pass it from PluginInput.serverUrl.origin in index.ts",
-    )
-  }
-  return new MetadataMissionStorage({
-    baseUrl: config.baseUrl,
-    headers: config.headers ?? {},
-  })
+  return new MetadataMissionStorage({ v2Client: config.v2Client })
 }

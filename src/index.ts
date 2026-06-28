@@ -30,18 +30,21 @@ import { VERIFY_AGENT_PROMPT } from "./verify/verify-prompt.js"
 
 const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
   // Client initialization.
-  // The plugin runtime injects a V2 SDK client (input.client). We use its
-  // session.get() for parent-session lookups (for sub-agent routing) and
-  // its fetch + headers via getConfig() when constructing a sibling client
-  // for promptAsync. Mission state lives inside the opencode session's
-  // metadata column (see mission-storage.ts).
+  // The opencode runtime injects a V1 SDK client (input.client._client).
+  // We pass that client's `fetch` (with auth/cookies/sandboxed transport
+  // already wired up by opencode) into a fresh V2 SDK client. Using the
+  // V2 SDK lets us call `session.get` / `session.update` with typed
+  // responses, and the V1 fetch means the plugin's HTTP calls reuse the
+  // opencode-trusted transport (not blocked by the plugin sandbox).
   const v1Client = extractV1Client(input.client)
-
-  const v1Headers = v1Client?.getConfig?.()?.headers as Record<string, string> | undefined
-  const storage = createMissionStorage({
+  const v1Config = v1Client?.getConfig?.() ?? {}
+  const v2Client = createOpencodeClient({
     baseUrl: input.serverUrl.origin,
-    headers: v1Headers,
+    headers: v1Config.headers,
+    fetch: v1Config.fetch,
   })
+
+  const storage = createMissionStorage({ v2Client })
   if (process.env.OPENCODE_MISSION_DEBUG === "1") {
     log(`mission storage mode=${storage.mode}`)
   }
@@ -50,17 +53,8 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
     if (!h.ok) log(`mission storage health check failed: ${h.detail ?? "unknown"}`)
   })
 
-  const http = createSessionHttp({
-    v2Client: input.client,
-  })
+  const http = createSessionHttp({ v2Client })
 
-  // A second V2 client instance for promptAsync; the SDK's promptAsync lives
-  // on its session namespace and uses the same transport.
-  const v2Client = createOpencodeClient({
-    baseUrl: input.serverUrl.origin,
-    headers: v1Client?.getConfig?.()?.headers,
-    fetch: v1Client?.getConfig?.()?.fetch,
-  })
   const store = new MissionStore(storage, http)
 
   // Tool registration
