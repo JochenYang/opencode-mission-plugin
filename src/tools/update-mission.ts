@@ -50,15 +50,32 @@ export function updateMissionTool(store: MissionStore) {
         return `Error: agent "${ctx.agent}" is not authorized to update mission status. Only the main session can.`
       }
 
-      // 'complete' is reserved for the mission-verify sub-agent.
+      // 'complete' is reserved for the mission-verify sub-agent under
+      // normal flow, but the main session may also call it as a safety
+      // net: if a passing verification report is already on the
+      // mission, the verify has run independently and the main
+      // session can confirm. This guards against the rare case where
+      // the verify subagent's text-complete hook did not fire (so no
+      // auto-complete) AND the verify subagent did not call
+      // UpdateMission itself (the prompt told it to but the model
+      // skipped). Without this relaxation the mission is stuck in
+      // ACTIVE forever despite a passing verify.
       if (args.status === "complete" && ctx.agent !== "mission-verify") {
-        return `Error: status="complete" can only be set by the mission-verify sub-agent. The main session should use the task tool to spawn mission-verify instead.`
+        const targetID = args.missionSessionID ?? ctx.sessionID
+        const existing = await store.read(targetID)
+        if (!existing) {
+          return `Error: status="complete" requires an existing mission. No mission found for sessionID=${targetID}.`
+        }
+        if (existing.verificationReport?.verdict !== "passed") {
+          return `Error: status="complete" from the main session requires a passing verification report. Run the mission-verify subagent first, or call UpdateMission from the verify subagent itself.`
+        }
+        // Main session confirming a verified mission — allowed.
       }
 
       // 'complete' from the verify sub-agent needs the parent missionSessionID,
       // because the mission is keyed on the parent session, not the verify
       // sub-agent's own session.
-      if (args.status === "complete" && !args.missionSessionID) {
+      if (args.status === "complete" && ctx.agent === "mission-verify" && !args.missionSessionID) {
         return `Error: status="complete" requires missionSessionID to identify the parent mission. The verify sub-agent's context includes <session_id> for this purpose.`
       }
 
