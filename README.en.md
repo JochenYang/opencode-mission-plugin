@@ -23,7 +23,7 @@ An OpenCode plugin that adds an autonomous mission-driven agent mode: the user s
 | **Status-adaptive system prompt** | `<mission_status>` block + dynamic commands + 3-turn reminder + wrap-up directive |
 | **Self-audit**                 | Every turn's continuation prompt + system prompt force a 4-dim self-check       |
 | **Interrupt semantics**        | User Esc → `paused` (wallclock frozen) / runtime error → `blocked`              |
-| **Pluggable storage**  | Default: self-managed JSON at `~/.config/opencode/missions/<workspace>/<sessionID>.json`. Optional: opencode session metadata (requires 1.18+) |
+| **Pluggable storage**  | Default: self-managed JSON at `~/.config/opencode/missions/<workspace>/<sessionID>.json`. Optional: opencode session metadata mode |
 
 ## Installation
 
@@ -178,7 +178,9 @@ Then in the TUI prompt:
 
 ## Storage backends
 
-The default mode is self-managed JSON files (see path below), independent of any opencode version. If you are on opencode 1.18+ and want missions to be inherited automatically when a session is forked, switch to the session-metadata mode:
+The default mode is self-managed JSON files (see path below). **Works with any opencode version.**
+
+If you want missions to be inherited automatically when a session is forked, switch to the session-metadata mode:
 
 ```bash
 # Default (0.2.x behavior, works on every opencode version)
@@ -186,14 +188,13 @@ unset OPENCODE_MISSION_STORAGE
 
 # Optional: store the mission inside the opencode session's metadata
 # Pros: automatic fork inheritance, centralized backup, no extra disk footprint
-# Requires: opencode 1.18+ with a working /session/:id PATCH endpoint
 export OPENCODE_MISSION_STORAGE=metadata
 ```
 
 | Mode | Storage location | Requires | Fork inheritance |
 |------|------------------|----------|------------------|
 | `file` (default) | `~/.config/opencode/missions/<workspace>/<sessionID>.json` | nothing | no (manual continuation API needed) |
-| `metadata` | `Session.metadata.mission` (via `PATCH /session/:id`) | opencode 1.18+ | yes (server copies parent session metadata into child session) |
+| `metadata` | `Session.metadata.mission` (via `PATCH /session/:id`) | opencode server exposes `PATCH /session/:id` | yes (server copies parent session metadata into child session) |
 
 **Switching takes effect at next plugin boot** (env is read at startup). The two modes do not pollute each other: if you switch storage on a session, the old mission stays in the old storage untouched and new writes go to the new storage.
 
