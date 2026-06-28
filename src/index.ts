@@ -31,20 +31,19 @@ import { VERIFY_AGENT_PROMPT } from "./verify/verify-prompt.js"
 const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
   // Client initialization.
   // The opencode runtime injects a V1 SDK client (input.client._client).
-  // We pass that client's `fetch` (with auth/cookies/sandboxed transport
-  // already wired up by opencode) into a fresh V2 SDK client. Using the
-  // V2 SDK lets us call `session.get` / `session.update` with typed
-  // responses, and the V1 fetch means the plugin's HTTP calls reuse the
-  // opencode-trusted transport (not blocked by the plugin sandbox).
+  // We extract its fetch (with auth/cookies and the opencode-trusted
+  // transport) and pass it to both mission-storage and session-http
+  // directly. The V2 SDK is generated from the same API spec as the
+  // server, but its 1.17.11 session.update emits a request body that
+  // the server's payload validator rejects with "Expected object, got
+  // undefined". Raw fetch against /api/session/:sessionID avoids that
+  // bug and lets us use the V1 fetch (sandbox-safe).
   const v1Client = extractV1Client(input.client)
   const v1Config = v1Client?.getConfig?.() ?? {}
-  const v2Client = createOpencodeClient({
-    baseUrl: input.serverUrl.origin,
-    headers: v1Config.headers,
-    fetch: v1Config.fetch,
-  })
+  const fetchImpl = v1Config.fetch
+  const baseUrl = input.serverUrl.origin
 
-  const storage = createMissionStorage({ v2Client })
+  const storage = createMissionStorage({ baseUrl, fetchImpl })
   if (process.env.OPENCODE_MISSION_DEBUG === "1") {
     log(`mission storage mode=${storage.mode}`)
   }
@@ -53,8 +52,14 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
     if (!h.ok) log(`mission storage health check failed: ${h.detail ?? "unknown"}`)
   })
 
-  const http = createSessionHttp({ v2Client })
+  const http = createSessionHttp({ baseUrl, fetchImpl })
 
+  // The V2 SDK is still used for promptAsync (continuation mechanism).
+  const v2Client = createOpencodeClient({
+    baseUrl,
+    headers: v1Config.headers,
+    fetch: v1Config.fetch,
+  })
   const store = new MissionStore(storage, http)
 
   // Tool registration
