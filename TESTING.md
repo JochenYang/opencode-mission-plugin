@@ -69,7 +69,7 @@ opencode
 **观察项**：
 
 - [ ] agent 第一个工具调用还是 `CreateMission`
-- [ ] 创建文件时**不被权限弹窗卡住**（bash 协议起作用）
+- [ ] 创建文件时**不被权限弹窗卡住**（PowerShell 通用守则起作用）
 - [ ] budget 接近上限时 agent 收到 "Budget tight" 提示
 - [ ] 如果 budget 耗尽，mission 自动转 `budget_limited`（agent 调 `UpdateMission status="blocked"` 走 wrap-up 指令）
 - [ ] mission 跑完后 `GetMission` 返回 "No active mission"

@@ -23,7 +23,6 @@ import { createEventHook } from "./hooks/event-hook.js"
 import { createChatMessageHook } from "./hooks/chat-message.js"
 import { createSystemTransformHook } from "./hooks/system-transform.js"
 import { createCommandExecuteHook } from "./hooks/command-execute.js"
-import { registerBashProtocolHooks } from "./hooks/bash-protocol.js"
 import { log } from "./utils/log.js"
 import { MISSION_COMMAND_TEMPLATE } from "./command-template.js"
 import { VERIFY_AGENT_PROMPT } from "./verify/verify-prompt.js"
@@ -76,12 +75,6 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
   const chatMessageHook = createChatMessageHook({ store, http, log })
   const systemTransformHook = createSystemTransformHook({ store, log })
   const commandExecuteHook = createCommandExecuteHook()
-  // Bash background protocol: auto-rewrite long-running dev server commands
-  // (npm run dev / vite / next dev / ...) into detached form so the bash
-  // tool returns immediately. See src/hooks/bash-protocol.ts.
-  const bashProtocolHooks = registerBashProtocolHooks({
-    workspaceDir: input.directory,
-  })
 
   return {
     tool: {
@@ -118,9 +111,6 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
     "experimental.text.complete": chatMessageHook["experimental.text.complete"],
     "experimental.chat.system.transform": systemTransformHook["experimental.chat.system.transform"],
     "command.execute.before": commandExecuteHook["command.execute.before"],
-    "tool.definition": bashProtocolHooks["tool.definition"],
-    "tool.execute.before": bashProtocolHooks["tool.execute.before"],
-    "tool.execute.after": bashProtocolHooks["tool.execute.after"],
   } as any
 }
 

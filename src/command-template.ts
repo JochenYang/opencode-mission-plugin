@@ -77,7 +77,7 @@ After 4-dimension self-audit:
 - **Any dimension fails**: do the missing work in this turn and re-audit. Do NOT stop to ask the user.
 - **Cannot make all four pass**: call \`UpdateMission status="blocked"\` with a clear reason.
 
-## Bash + dev-server protocol (READ THIS)
+## PowerShell shell habits (READ THIS)
 
 You are running in a PowerShell-on-Windows shell inside opencode. Two things will block your turn if mishandled:
 
@@ -88,7 +88,6 @@ You are running in a PowerShell-on-Windows shell inside opencode. Two things wil
 
 1. The shell tool is pre-configured with \`"permission": {"bash": {"*": "allow"}}\` for the workspace (see \`~/.config/opencode/opencode.json\`). Most commands will NOT prompt.
 2. Destructive patterns still prompt: \`Remove-Item *\`, \`rm -rf *\`, \`cmdkey /delete*\`, etc. The user has explicitly asked for these to remain prompting.
-3. Long-running dev servers in the background do NOT need explicit \`-Confirm\`. If a prompt still appears, it is opencode asking for \`permission.ask\`, not PowerShell. The dialog has a "always allow" button the user can click once to silence it for the rest of the mission.
 
 ### CRITICAL: one command per bash call (NEVER chain with \`;\`)
 

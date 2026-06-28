@@ -222,9 +222,9 @@ The plugin auto-completes the mission when `experimental.text.complete` intercep
 
 The command template opens with an ABSOLUTE RULE instructing the LLM to make `CreateMission` its **first** tool call — no `GetMission` to "check if there's an existing mission", no `bash` to explore, no `todowrite` to plan. Just call `CreateMission`. This bypasses the LLM's strong default of "look before you leap" which would otherwise skip past the mission tool entirely and complete the task in normal mode.
 
-## 11. Bash protocol
+## 11. PowerShell shell habits
 
-The command template also includes a bash protocol that warns the LLM about two failure modes that block turns in this environment:
+The command template also includes PowerShell shell habits that warn the LLM about two failure modes that block turns in this environment:
 
 1. **Permission dialogs**: opencode matches bash patterns against the `permission` config; if the LLM chains multiple commands with `;`, the shell AST parser treats the whole chain as one node, and any sub-command matching an `ask` pattern (e.g. `Remove-Item *`) blocks the entire turn.
 2. **Detached processes**: `Start-Process` without `-NoNewWindow -PassThru` leaves the parent shell waiting on an interactive `Id:` prompt.

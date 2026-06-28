@@ -135,7 +135,7 @@ Every continuation prompt AND the active system prompt force a 4-dimension check
 
 A plan / summary / first pass is NOT a complete result.
 
-## Bash protocol (must read)
+## PowerShell shell habits (must read)
 
 The agent runs in a PowerShell-on-Windows shell inside opencode. **Avoid**:
 

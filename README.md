@@ -134,7 +134,7 @@ Agent 收到命令后会**强制**：
 
 **禁止**以"计划/摘要/初版"作为完成结果。
 
-## bash 协议（必读）
+## PowerShell shell habits（必读）
 
 agent 在 PowerShell-on-Windows shell 里跑，**避免这些**：
 
