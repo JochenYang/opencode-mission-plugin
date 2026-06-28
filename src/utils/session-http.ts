@@ -1,24 +1,18 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  Session info lookup
 //
-// For sub-agent routing we need the parent session's ID. We use raw
-// fetch against the canonical /api/session/:sessionID route. The fetch
-// implementation comes from the V1 client (opencode-injected) so it
-// uses the opencode-trusted transport, not the plugin-sandboxed
-// globalThis.fetch. This pattern matches mission-storage.ts so both
-// the read and write paths share one fetch.
-//
-// Mission persistence is handled by MissionStorage (see mission-storage.ts).
+// For sub-agent routing we need the parent session's ID. We use the V2
+// SDK's session.get() API to retrieve the session object, avoiding raw
+// fetch (which hits a response-wrapper bug with the V1 client's fetch
+// that causes "evaluating 'v[0]'" errors in in-process RPC mode).
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface SessionHttpConfig {
   /**
-   * The opencode-trusted fetch implementation. In practice this is
-   * `v1Client.getConfig().fetch` from the plugin runtime.
+   * The V2 SDK OpencodeClient injected by the opencode runtime.
+   * We use its `session.get()` method for session-info lookup.
    */
-  fetchImpl: typeof fetch
-  /** Base URL of the opencode server. */
-  baseUrl: string
+  client: any
 }
 
 export interface SessionHttp {
@@ -27,31 +21,23 @@ export interface SessionHttp {
   ): Promise<{ id: string; parentID?: string; metadata: Record<string, unknown> } | null>
 }
 
-function stripSlash(s: string): string {
-  return s.endsWith("/") ? s.slice(0, -1) : s
-}
-
-function isHtmlResponse(text: string): boolean {
-  const head = text.trimStart().slice(0, 64).toLowerCase()
-  return head.startsWith("<!doctype") || head.startsWith("<html")
+/** Extract the inner data from the V2 SDK's { data, request, response } wrapper. */
+function unwrap(result: any): any {
+  if (!result) return null
+  if (typeof result === "object" && "data" in result) return result.data
+  return result
 }
 
 export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
-  const { fetchImpl, baseUrl } = config
-  const base = stripSlash(baseUrl)
+  const session = config.client.session
 
   async function getSession(
     sessionID: string,
   ): Promise<{ id: string; parentID?: string; metadata: Record<string, unknown> } | null> {
     try {
-      const resp = await fetchImpl(`${base}/api/session/${encodeURIComponent(sessionID)}`, {
-        method: "GET",
-      })
-      if (!resp.ok) return null
-      const text = await resp.text()
-      if (isHtmlResponse(text)) return null
-      const data = JSON.parse(text)
-      if (!data.id) return null
+      const result = await session.get({ sessionID })
+      const data = unwrap(result)
+      if (!data || !data.id) return null
       return {
         id: data.id,
         parentID: data.parentID,
@@ -63,12 +49,4 @@ export function createSessionHttp(config: SessionHttpConfig): SessionHttp {
   }
 
   return { getSession }
-}
-
-// Kept for callers that still hold a reference; in 1.17.x the runtime
-// injects a V2 SDK client and the V1 client (input.client._client) is
-// no longer the canonical transport. We retain the export so the build
-// does not break elsewhere, but it is no longer used for session lookup.
-export function extractV1Client(inputClient: unknown): any {
-  return (inputClient as any)?._client
 }

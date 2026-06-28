@@ -12,9 +12,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { Plugin, PluginModule, PluginInput, Hooks } from "@opencode-ai/plugin"
-import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { MissionStore } from "./mission-store.js"
-import { createSessionHttp, extractV1Client } from "./utils/session-http.js"
+import { createSessionHttp } from "./utils/session-http.js"
 import { createMissionStorage } from "./mission-storage.js"
 import { createMissionTool } from "./tools/create-mission.js"
 import { updateMissionTool } from "./tools/update-mission.js"
@@ -30,20 +29,15 @@ import { VERIFY_AGENT_PROMPT } from "./verify/verify-prompt.js"
 
 const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
   // Client initialization.
-  // The opencode runtime injects a V1 SDK client (input.client._client).
-  // We extract its fetch (with auth/cookies and the opencode-trusted
-  // transport) and pass it to both mission-storage and session-http
-  // directly. The V2 SDK is generated from the same API spec as the
-  // server, but its 1.17.11 session.update emits a request body that
-  // the server's payload validator rejects with "Expected object, got
-  // undefined". Raw fetch against /api/session/:sessionID avoids that
-  // bug and lets us use the V1 fetch (sandbox-safe).
-  const v1Client = extractV1Client(input.client)
-  const v1Config = v1Client?.getConfig?.() ?? {}
-  const fetchImpl = v1Config.fetch
-  const baseUrl = input.serverUrl.origin
-
-  const storage = createMissionStorage({ baseUrl, fetchImpl })
+  // The opencode runtime injects a V2 SDK OpencodeClient as input.client.
+  // We use its `session` API directly for mission persistence (get/update),
+  // and its `session.promptAsync` for the continuation mechanism.
+  // Using the V2 SDK's session API avoids a bug in raw fetch with the
+  // V1 client: the V1 fetch wraps responses in a {v: [...]} envelope that
+  // crashes with "evaluating 'v[0]'" when the raw server response
+  // (without the `v` wrapper) is parsed.
+  const client = input.client as any
+  const storage = createMissionStorage({ session: client.session })
   if (process.env.OPENCODE_MISSION_DEBUG === "1") {
     log(`mission storage mode=${storage.mode}`)
   }
@@ -52,14 +46,8 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
     if (!h.ok) log(`mission storage health check failed: ${h.detail ?? "unknown"}`)
   })
 
-  const http = createSessionHttp({ baseUrl, fetchImpl })
+  const http = createSessionHttp({ client })
 
-  // The V2 SDK is still used for promptAsync (continuation mechanism).
-  const v2Client = createOpencodeClient({
-    baseUrl,
-    headers: v1Config.headers,
-    fetch: v1Config.fetch,
-  })
   const store = new MissionStore(storage, http)
 
   // Tool registration
@@ -73,7 +61,7 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
     store,
     http,
     promptAsync: async (sessionID, text) => {
-      await v2Client.session.promptAsync({
+      await client.session.promptAsync({
         sessionID,
         parts: [{ type: "text" as const, text, synthetic: true }],
       })

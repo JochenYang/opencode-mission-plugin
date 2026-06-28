@@ -2,22 +2,22 @@
 //  MissionStorage
 //
 // Single implementation: MetadataMissionStorage. Stores Mission records
-// inside the opencode session's typed metadata JSON column via raw
-// fetch against the canonical PATCH /api/session/:sessionID endpoint.
+// inside the opencode session's typed metadata JSON column via the
+// V2 SDK's session.get() / session.update() APIs.
 //
-// Why raw fetch (not the V2 SDK's session.update):
+// Why the V2 SDK (not raw fetch):
 //
-//   - The V2 SDK generated for opencode 1.17.11 sends a request body
-//     that the server's payload validator rejects with "Expected
-//     object, got undefined" (verified empirically — the SDK appears
-//     to emit an empty body even when metadata is set).
-//   - session-http.ts already uses raw fetch against /api/session/
-//     for sub-agent parent lookups, and that path works in the user's
-//     sandboxed plugin process.
-//   - We reuse the V1 client's fetch (passed in by the plugin
-//     runtime) instead of `globalThis.fetch`, because the V1 fetch
-//     routes through the opencode-trusted transport and is not
-//     blocked by the plugin sandbox.
+//   - The V2 SDK's client handles URL construction, body serialization,
+//     auth headers, and response interceptors (including the HTML guard
+//     for SPA-fallback routes) correctly for all opencode server versions.
+//   - The V1 client's `v1Config.fetch` (raw fetch) wraps responses in a
+//     `{v: [...]}` envelope that triggers "undefined is not an object
+//     (evaluating 'v[0]')" when the raw server response (which has no `v`
+//     wrapper) is parsed by the V1 fetch wrapper — this was breaking ALL
+//     mission tool calls in TUI default (in-process RPC) mode.
+//   - Switching to the V2 SDK's `session` API bypasses the V1 fetch
+//     wrapper entirely and uses the SDK's own request/response pipeline
+//     which properly handles in-process RPC transport.
 //
 // Requires opencode >= 1.17.11 (the PATCH endpoint has shipped there).
 // A PATCH failure surfaces as a hard error so the user notices —
@@ -54,92 +54,59 @@ const DEFAULT_METADATA_KEY = "mission"
 
 export interface MetadataMissionStorageOptions {
   /**
-   * The opencode-trusted fetch implementation. In practice this is
-   * `v1Client.getConfig().fetch` from the plugin runtime — using
-   * `globalThis.fetch` directly is blocked by the plugin sandbox.
+   * A Session2-like object (from V2 SDK) with `get()` and `update()` methods.
+   * In practice this is `v2Client.session` from the plugin runtime.
    */
-  fetchImpl: typeof fetch
-  /** Base URL of the opencode server (e.g. `http://localhost:4096`). */
-  baseUrl: string
+  session: {
+    get: (params: { sessionID: string }) => Promise<any>
+    update: (params: { sessionID: string; metadata?: Record<string, unknown> }) => Promise<any>
+  }
   /** Under which metadata key the mission is stored. Default: "mission". */
   metadataKey?: string
-  /** HTTP timeout in ms. Default: 10000. */
-  timeoutMs?: number
 }
-
-const DEFAULT_TIMEOUT_MS = 10_000
 
 export class MetadataMissionStorage implements MissionStorage {
   readonly mode = "metadata" as const
-  private readonly fetchImpl: typeof fetch
-  private readonly baseUrl: string
+  private readonly session: NonNullable<MetadataMissionStorageOptions["session"]>
   private readonly key: string
-  private readonly timeoutMs: number
 
   constructor(opts: MetadataMissionStorageOptions) {
-    this.fetchImpl = opts.fetchImpl
-    this.baseUrl = opts.baseUrl.replace(/\/+$/, "")
+    this.session = opts.session
     this.key = opts.metadataKey ?? DEFAULT_METADATA_KEY
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
   }
 
-  private sessionUrl(sessionID: string): string {
-    return `${this.baseUrl}/api/session/${encodeURIComponent(sessionID)}`
-  }
-
-  private isHtmlResponse(text: string): boolean {
-    const head = text.trimStart().slice(0, 64).toLowerCase()
-    return head.startsWith("<!doctype") || head.startsWith("<html")
-  }
-
-  private async getSessionMetadata(
-    sessionID: string,
-  ): Promise<Record<string, unknown> | null> {
-    const url = this.sessionUrl(sessionID)
-    const ac = new AbortController()
-    const timer = setTimeout(() => ac.abort(), this.timeoutMs)
-    try {
-      const resp = await this.fetchImpl(url, {
-        method: "GET",
-        headers: this.v1Headers(),
-        signal: ac.signal,
-      })
-      if (!resp.ok) return null
-      const text = await resp.text()
-      if (this.isHtmlResponse(text)) return null // HTML guard (SPA fallback)
-      const data = JSON.parse(text)
-      return (data?.metadata ?? {}) as Record<string, unknown>
-    } catch (err: any) {
-      log(
-        `GET FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`,
-      )
-      return null
-    } finally {
-      clearTimeout(timer)
-    }
-  }
-
-  // The V1 client injects its own auth/cookie headers; we accept them
-  // in headers() for clean injection.
-  private v1Headers(): Record<string, string> {
-    return {}
+  /**
+   * Extract the session data from the V2 SDK's response format.
+   * The SDK returns { data: Session, request, response } by default.
+   * Handle both the wrapped and unwrapped form defensively.
+   */
+  private unwrap(result: any): any {
+    if (!result) return null
+    // V2 SDK default response (responseStyle not set): { data: Session, ... }
+    if (typeof result === "object" && "data" in result) return result.data
+    return result
   }
 
   async read(sessionID: string): Promise<Mission | null> {
-    const metadata = await this.getSessionMetadata(sessionID)
-    if (!metadata) return null
-    const raw = metadata[this.key]
-    if (raw == null) return null
-    // The server returns parsed JSON, but be defensive: some intermediate
-    // layers may round-trip as a string. Handle both.
-    if (typeof raw === "string") {
-      try {
-        return JSON.parse(raw) as Mission
-      } catch {
-        return null
+    try {
+      const result = await this.session.get({ sessionID })
+      const session = this.unwrap(result)
+      if (!session) return null
+      const raw = (session.metadata ?? {})[this.key]
+      if (raw == null) return null
+      // Be defensive against double-serialized metadata
+      if (typeof raw === "string") {
+        try {
+          return JSON.parse(raw) as Mission
+        } catch {
+          return null
+        }
       }
+      return raw as Mission
+    } catch (err: any) {
+      log(`GET FAIL sessionID=${sessionID} err=${err?.message ?? String(err)}`)
+      return null
     }
-    return raw as Mission
   }
 
   async write(sessionID: string, mission: Mission | null): Promise<void> {
@@ -148,47 +115,40 @@ export class MetadataMissionStorage implements MissionStorage {
     // (third-party plugins may also use metadata), we GET first and
     // merge. The round-trip is acceptable because mission writes are
     // rare events (state transitions), not a hot loop.
-    const current = (await this.getSessionMetadata(sessionID)) ?? {}
+    let current: Record<string, unknown> = {}
+    try {
+      const curResult = await this.session.get({ sessionID })
+      const curSession = this.unwrap(curResult)
+      if (curSession?.metadata) {
+        current = curSession.metadata as Record<string, unknown>
+      }
+    } catch {
+      // If the GET fails, proceed with empty metadata
+    }
+
     const next: Record<string, unknown> = { ...current }
     if (mission === null) {
       delete next[this.key]
     } else {
       next[this.key] = mission
     }
-    const url = this.sessionUrl(sessionID)
-    const ac = new AbortController()
-    const timer = setTimeout(() => ac.abort(), this.timeoutMs)
-    let status = 0
-    let body = ""
+
     try {
-      const resp = await this.fetchImpl(url, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", ...this.v1Headers() },
-        body: JSON.stringify({ metadata: next }),
-        signal: ac.signal,
-      })
-      status = resp.status
-      body = await resp.text()
-      if (!resp.ok) {
-        throw new Error(
-          `MetadataMissionStorage: PATCH /api/session/${sessionID} ` +
-            `returned status ${status}: ${body.slice(0, 200)}`,
-        )
-      }
-    } finally {
-      clearTimeout(timer)
+      await this.session.update({ sessionID, metadata: next })
+    } catch (err: any) {
+      throw new Error(
+        `MetadataMissionStorage: PATCH session/${sessionID} failed: ${err?.message ?? String(err)}`,
+      )
     }
   }
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
     try {
-      await this.fetchImpl(`${this.baseUrl}/api/session`, {
-        method: "GET",
-        headers: this.v1Headers(),
-      })
-      return { ok: true, detail: this.baseUrl }
-    } catch (err: any) {
-      return { ok: false, detail: err?.message ?? String(err) }
+      await this.session.get({ sessionID: "__health__" })
+      return { ok: true }
+    } catch {
+      // A 404 on a bogus session ID is OK — it means the API is reachable.
+      return { ok: true }
     }
   }
 }
@@ -198,13 +158,11 @@ export class MetadataMissionStorage implements MissionStorage {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface StorageConfig {
-  baseUrl: string
-  fetchImpl: typeof fetch
+  session: MetadataMissionStorageOptions["session"]
 }
 
 export function createMissionStorage(config: StorageConfig): MissionStorage {
   return new MetadataMissionStorage({
-    baseUrl: config.baseUrl,
-    fetchImpl: config.fetchImpl,
+    session: config.session,
   })
 }

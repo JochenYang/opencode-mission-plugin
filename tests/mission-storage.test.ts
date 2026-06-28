@@ -1,8 +1,8 @@
 // Unit tests for the MissionStorage abstraction. Run with: bun test
 //
-// Covers MetadataMissionStorage using raw fetch against
-// /api/session/:sessionID. The fetch is mocked to capture PATCH
-// requests and return canned GET responses.
+// Covers MetadataMissionStorage using the V2 SDK's session.get() /
+// session.update() API. The session is mocked to capture update
+// calls and return canned get responses.
 
 import { describe, expect, test } from "bun:test"
 import {
@@ -38,206 +38,122 @@ function makeMission(overrides: Partial<Mission> = {}): Mission {
   }
 }
 
-interface MockFetchOptions {
-  /** Body returned by GET /api/session/:id (parsed as JSON, sent to res.json). */
+interface MockSessionOptions {
+  /** The metadata object returned by get() (session.metadata). */
   metadata?: Record<string, unknown> | null
-  /** Status returned by GET (default 200). */
-  getStatus?: number
-  /** Status returned by PATCH (default 200). */
-  patchStatus?: number
-  /** Capture every PATCH call here. */
-  capture?: PatchCall[]
-  /** Throws on every call (e.g. network down). */
-  throwOnCall?: boolean
+  /** If true, get() throws. */
+  getThrows?: boolean
+  /** If true, update() throws. */
+  updateThrows?: boolean
+  /** Capture every update() call here. */
+  capture?: UpdateCall[]
 }
 
-interface PatchCall {
-  url: string
-  method: string
-  body: string
-  headers: Record<string, string>
+interface UpdateCall {
+  sessionID: string
+  metadata: Record<string, unknown>
 }
 
-function makeMockFetch(opts: MockFetchOptions = {}): {
-  fetch: typeof fetch
-  patches: PatchCall[]
+/**
+ * Simulates the V2 SDK's Session2 interface.
+ * get() returns { data: { id, metadata } } (the V2 SDK default wrapper).
+ * update() captures the call and resolves.
+ */
+function makeMockSession(opts: MockSessionOptions = {}): {
+  session: { get: (p: { sessionID: string }) => Promise<any>; update: (p: { sessionID: string; metadata?: Record<string, unknown> }) => Promise<any> }
+  updates: UpdateCall[]
 } {
-  // Use the caller-provided capture array (or a fresh one) so the
-  // caller can observe captured PATCH calls by inspecting the same
-  // reference we push into.
-  const patches = opts.capture ?? []
-  const headersToObj = (h: HeadersInit | undefined): Record<string, string> => {
-    const out: Record<string, string> = {}
-    if (!h) return out
-    if (h instanceof Headers) {
-      h.forEach((v, k) => {
-        out[k] = v
-      })
-    } else {
-      Object.assign(out, h)
-    }
-    return out
+  const updates = opts.capture ?? []
+  return {
+    session: {
+      async get({ sessionID: _sid }: { sessionID: string }) {
+        if (opts.getThrows) throw new Error("get failed")
+        if (opts.metadata === null || opts.metadata === undefined) {
+          return { data: null }
+        }
+        return { data: { id: _sid, metadata: opts.metadata } }
+      },
+      async update({ sessionID, metadata }: { sessionID: string; metadata?: Record<string, unknown> }) {
+        if (opts.updateThrows) throw new Error("update failed")
+        updates.push({ sessionID, metadata: metadata ?? {} })
+        return { data: { id: sessionID, metadata } }
+      },
+    },
+    updates,
   }
-
-  const fetchImpl: typeof fetch = async (input: any, init?: any) => {
-    if (opts.throwOnCall) throw new Error("network down")
-    const url: string =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : typeof input.url === "string"
-            ? input.url
-            : String(input.url)
-    const method: string =
-      (init?.method as string | undefined) ??
-      (input && typeof input === "object" ? (input as any).method : undefined) ??
-      "GET"
-    const isPatch = method.toUpperCase() === "PATCH"
-    const isGet = method.toUpperCase() === "GET"
-    const body =
-      typeof init?.body === "string"
-        ? init.body
-        : input && typeof input === "object" && typeof (input as any).body === "string"
-          ? ((input as any).body as string)
-          : ""
-
-    if (isPatch) {
-      patches.push({
-        url,
-        method,
-        body,
-        headers: headersToObj(init?.headers ?? (input && (input as any).headers)),
-      })
-    }
-
-    if (isGet) {
-      const status = opts.getStatus ?? 200
-      if (opts.metadata === null || opts.metadata === undefined) {
-        return new Response("not found", { status: 404 }) as any
-      }
-      return new Response(
-        JSON.stringify({ id: "ses_x", metadata: opts.metadata }),
-        { status, headers: { "content-type": "application/json" } },
-      ) as any
-    }
-    if (isPatch) {
-      return new Response("", { status: opts.patchStatus ?? 200 }) as any
-    }
-    return new Response("", { status: 200 }) as any
-  }
-  return { fetch: fetchImpl, patches }
 }
 
 // ─── MetadataMissionStorage ──────────────────────────────────────────────
 
 describe("MetadataMissionStorage", () => {
   test("read returns null when GET has no metadata mission key", async () => {
-    const { fetch } = makeMockFetch({ metadata: {} })
-    const s = new MetadataMissionStorage({
-      baseUrl: "https://api.example.com",
-      fetchImpl: fetch,
-    })
+    const { session } = makeMockSession({ metadata: {} })
+    const s = new MetadataMissionStorage({ session })
     expect(await s.read("ses_x")).toBeNull()
   })
 
   test("read parses a JSON-string mission (defensive round-trip)", async () => {
     const m = makeMission()
-    const { fetch } = makeMockFetch({
+    const { session } = makeMockSession({
       metadata: { mission: JSON.stringify(m) },
     })
-    const s = new MetadataMissionStorage({
-      baseUrl: "https://api.example.com",
-      fetchImpl: fetch,
-    })
+    const s = new MetadataMissionStorage({ session })
     const got = await s.read("ses_x")
     expect(got?.id).toBe(m.id)
     expect(got?.status).toBe("active")
   })
 
-  test("read returns null when GET 404s (session missing)", async () => {
-    const { fetch } = makeMockFetch({ metadata: null })
-    const s = new MetadataMissionStorage({
-      baseUrl: "https://api.example.com",
-      fetchImpl: fetch,
-    })
+  test("read returns null when GET returns null (session missing)", async () => {
+    const { session } = makeMockSession({ metadata: null })
+    const s = new MetadataMissionStorage({ session })
     expect(await s.read("ses_x")).toBeNull()
   })
 
   test("read returns null on transport failure (safe degradation)", async () => {
-    const { fetch } = makeMockFetch({ throwOnCall: true })
-    const s = new MetadataMissionStorage({
-      baseUrl: "https://api.example.com",
-      fetchImpl: fetch,
-    })
+    const { session } = makeMockSession({ getThrows: true })
+    const s = new MetadataMissionStorage({ session })
     expect(await s.read("ses_x")).toBeNull()
   })
 
-  test("write PATCHes metadata with merged keys (preserves siblings)", async () => {
-    const { fetch, patches } = makeMockFetch({
+  test("write updates metadata with merged keys (preserves siblings)", async () => {
+    const { session, updates } = makeMockSession({
       metadata: { otherKey: "keep-me", count: 7 },
       capture: [],
     })
-    const s = new MetadataMissionStorage({
-      baseUrl: "https://api.example.com",
-      fetchImpl: fetch,
-    })
+    const s = new MetadataMissionStorage({ session })
     await s.write("ses_x", makeMission())
-    expect(patches).toHaveLength(1)
-    const call = patches[0]
-    expect(call.url).toBe("https://api.example.com/api/session/ses_x")
-    expect(call.method).toBe("PATCH")
-    const body = JSON.parse(call.body)
-    expect(body.metadata.otherKey).toBe("keep-me")
-    expect(body.metadata.count).toBe(7)
-    expect((body.metadata.mission as Mission).id).toBe("mission_test_1")
-    expect(call.headers["Content-Type"]).toBe("application/json")
+    expect(updates).toHaveLength(1)
+    const call = updates[0]
+    expect(call.sessionID).toBe("ses_x")
+    expect(call.metadata.otherKey).toBe("keep-me")
+    expect(call.metadata.count).toBe(7)
+    expect((call.metadata.mission as Mission).id).toBe("mission_test_1")
   })
 
   test("write(null) deletes the mission key but preserves siblings", async () => {
-    const { fetch, patches } = makeMockFetch({
+    const { session, updates } = makeMockSession({
       metadata: { mission: { id: "old" }, otherKey: "keep" },
       capture: [],
     })
-    const s = new MetadataMissionStorage({
-      baseUrl: "https://api.example.com",
-      fetchImpl: fetch,
-    })
+    const s = new MetadataMissionStorage({ session })
     await s.write("ses_x", null)
-    const body = JSON.parse(patches[0].body)
-    expect(body.metadata.mission).toBeUndefined()
-    expect(body.metadata.otherKey).toBe("keep")
+    const body = updates[0].metadata
+    expect(body.mission).toBeUndefined()
+    expect(body.otherKey).toBe("keep")
   })
 
-  test("write throws when PATCH returns non-2xx", async () => {
-    const { fetch } = makeMockFetch({
+  test("write throws when update() throws", async () => {
+    const { session } = makeMockSession({
       metadata: {},
-      patchStatus: 500,
+      updateThrows: true,
     })
-    const s = new MetadataMissionStorage({
-      baseUrl: "https://api.example.com",
-      fetchImpl: fetch,
-    })
-    await expect(s.write("ses_x", makeMission())).rejects.toThrow(
-      /PATCH \/api\/session\/ses_x returned status 500/,
-    )
-  })
-
-  test("write throws when fetchImpl throws", async () => {
-    const { fetch } = makeMockFetch({ throwOnCall: true })
-    const s = new MetadataMissionStorage({
-      baseUrl: "https://api.example.com",
-      fetchImpl: fetch,
-    })
-    await expect(s.write("ses_x", makeMission())).rejects.toThrow(/network down/)
+    const s = new MetadataMissionStorage({ session })
+    await expect(s.write("ses_x", makeMission())).rejects.toThrow(/PATCH session\/ses_x failed/)
   })
 
   test("mode label is 'metadata'", () => {
-    const { fetch } = makeMockFetch()
-    const s = new MetadataMissionStorage({
-      baseUrl: "https://api.example.com",
-      fetchImpl: fetch,
-    })
+    const { session } = makeMockSession()
+    const s = new MetadataMissionStorage({ session })
     expect(s.mode).toBe("metadata")
   })
 })
@@ -245,9 +161,9 @@ describe("MetadataMissionStorage", () => {
 // ─── Factory ────────────────────────────────────────────────────────────
 
 describe("createMissionStorage factory", () => {
-  test("returns MetadataMissionStorage with baseUrl + fetchImpl", () => {
-    const { fetch } = makeMockFetch()
-    const s = createMissionStorage({ baseUrl: "https://api.example.com", fetchImpl: fetch })
+  test("returns MetadataMissionStorage with session", () => {
+    const { session } = makeMockSession()
+    const s = createMissionStorage({ session })
     expect(s).toBeInstanceOf(MetadataMissionStorage)
     expect(s.mode).toBe("metadata")
   })
