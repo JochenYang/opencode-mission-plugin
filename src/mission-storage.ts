@@ -88,7 +88,10 @@ export class MetadataMissionStorage implements MissionStorage {
   }
 
   private sessionUrl(sessionID: string): string {
-    return `${this.baseUrl}/session/${encodeURIComponent(sessionID)}`
+    // 1.17.x canonical session path: /api/session/:sessionID. The V2 SDK
+    // uses /session/{sessionID} (no /api prefix) but raw fetch must use
+    // the /api prefix the server actually serves.
+    return `${this.baseUrl}/api/session/${encodeURIComponent(sessionID)}`
   }
 
   private async getSessionMetadata(sessionID: string): Promise<Record<string, unknown> | null> {
@@ -174,7 +177,7 @@ export class MetadataMissionStorage implements MissionStorage {
     const ok = await this.patchSessionMetadata(sessionID, next)
     if (!ok) {
       throw new Error(
-        `MetadataMissionStorage: PATCH /session/${sessionID} failed; ` +
+        `MetadataMissionStorage: PATCH /api/session/${sessionID} failed; ` +
           `mission state could not be persisted. Check opencode server logs.`,
       )
     }

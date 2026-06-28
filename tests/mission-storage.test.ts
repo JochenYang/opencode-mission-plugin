@@ -43,7 +43,7 @@ function makeMission(overrides: Partial<Mission> = {}): Mission {
 describe("MetadataMissionStorage", () => {
   test("read returns null when metadata has no mission key", async () => {
     const fetchImpl = mockFetch({
-      "GET /session/ses_x": { metadata: {} },
+      "GET /api/session/ses_x": { metadata: {} },
     })
     const s = new MetadataMissionStorage({
       baseUrl: "https://api.example.com",
@@ -56,7 +56,7 @@ describe("MetadataMissionStorage", () => {
   test("read parses a JSON-string mission (defensive round-trip)", async () => {
     const m = makeMission()
     const fetchImpl = mockFetch({
-      "GET /session/ses_x": {
+      "GET /api/session/ses_x": {
         metadata: { mission: JSON.stringify(m) },
       },
     })
@@ -74,10 +74,10 @@ describe("MetadataMissionStorage", () => {
     const patches: any[] = []
     const fetchImpl = mockFetch(
       {
-        "GET /session/ses_x": {
+        "GET /api/session/ses_x": {
           metadata: { otherKey: "keep-me", count: 7 },
         },
-        "PATCH /session/ses_x": { ok: true, capture: patches },
+        "PATCH /api/session/ses_x": { ok: true, capture: patches },
       },
       patches,
     )
@@ -100,10 +100,10 @@ describe("MetadataMissionStorage", () => {
     const patches: any[] = []
     const fetchImpl = mockFetch(
       {
-        "GET /session/ses_x": {
+        "GET /api/session/ses_x": {
           metadata: { mission: { id: "old" }, otherKey: "keep" },
         },
-        "PATCH /session/ses_x": { ok: true, capture: patches },
+        "PATCH /api/session/ses_x": { ok: true, capture: patches },
       },
       patches,
     )
@@ -120,8 +120,8 @@ describe("MetadataMissionStorage", () => {
 
   test("write throws when PATCH fails", async () => {
     const fetchImpl = mockFetch({
-      "GET /session/ses_x": { metadata: {} },
-      "PATCH /session/ses_x": { ok: false, status: 500 },
+      "GET /api/session/ses_x": { metadata: {} },
+      "PATCH /api/session/ses_x": { ok: false, status: 500 },
     })
     const s = new MetadataMissionStorage({
       baseUrl: "https://api.example.com",
@@ -129,7 +129,7 @@ describe("MetadataMissionStorage", () => {
       fetchImpl,
     })
     await expect(s.write("ses_x", makeMission())).rejects.toThrow(
-      /PATCH \/session\/ses_x failed/,
+      /PATCH \/api\/session\/ses_x failed/,
     )
   })
 
@@ -146,7 +146,7 @@ describe("MetadataMissionStorage", () => {
 
   test("HTML response on read is treated as missing metadata", async () => {
     const fetchImpl = mockFetch({
-      "GET /session/ses_x": { metadata: {}, rawBody: "<!doctype html>" },
+      "GET /api/session/ses_x": { metadata: {}, rawBody: "<!doctype html>" },
     })
     const s = new MetadataMissionStorage({
       baseUrl: "https://api.example.com",
