@@ -35,7 +35,7 @@ opencode-mission/
 │       ├── session-http.ts       # Session info lookup (parentID) for sub-agent routing
 │       └── format.ts             # Formatting helpers (duration, number, status output)
 ├── dist/
-│   └── index.js                  # Built single-file bundle (~56 KB)
+│   └── index.js                  # Built single-file bundle (~78 KB as of 0.3.7)
 ├── package.json
 ├── tsconfig.json
 ├── README.md                     # Chinese
@@ -163,7 +163,45 @@ Pass condition: `verdict === "passed"` iff all 4 dimensions >= 3 AND completenes
 
 Auto-complete: `experimental.text.complete` intercepts the subagent's final text, extracts the JSON block via `tryParseVerifyJson`, and if `verdict === "passed"` calls `store.markComplete(parentSessionID, report)`.
 
-### 8. The ABSOLUTE RULE (command template)
+### 11. Bash background protocol (auto-rewrite dev-server commands)
+
+`src/hooks/bash-protocol.ts` registers three hooks that detect long-running dev-server commands and rewrite them into background-launched form so the bash tool returns immediately instead of freezing the LLM turn.
+
+**Detection** — `looksLikeDevServer(cmd)`:
+
+- Splits on `&&` or `;`, takes the last segment, matches against a strict pattern list: `npm run dev`, `npm start`, `pnpm dev|start`, `yarn dev|start`, `bun run dev|bun dev`, `vite`/`vite dev`, `next dev|start`, `nuxt dev`, `flask run`, `uvicorn <anything>`, `python -m http.server`, `python -m flask run`.
+- Per-segment skip conditions (any match returns false): contains `&` (already backgrounded; `&&` was already split out), `nohup`, `> ` or `>>` (already redirected), `| tee` or `| tail` (LLM is reading output), or starts with `#` (comment).
+- Anchored at segment start, so `echo npm run dev` does NOT match.
+
+**Wrap** — `wrapInBackground(cmd, { cwd, logDir, platform })`:
+
+- Generates a stable slug (FNV-1a hash of the original command + cleaned prefix).
+- Windows: spawns a child `powershell -NoProfile -NoLogo -Command <cmd>` with `-WorkingDirectory <cwd>`, `-RedirectStandardOutput/Error` to `<logDir>/<slug>.log` and `<slug>.err.log`, `-NoNewWindow` so the parent shell returns immediately, then `Start-Sleep 400ms` + `Get-Process` liveness check.
+- Unix: `cd <cwd> && <cmd> > <logDir>/<slug>.log 2> <slug>.err.log &`; then `sleep 0.4` + `kill -0 $__bg_pid` liveness check. Does NOT `wait`.
+- Path separator: uses `path.win32.join` for win32 and `path.posix.join` for others, so the wrapper output is always correct for the target platform regardless of where the test runs.
+
+**Hook bundle** — `registerBashProtocolHooks(opts)` returns three hooks:
+
+- `tool.definition` (only for `toolID === "bash"`): APPENDS a `<bash_background_protocol>` block to the opencode-supplied description. Tells the LLM that dev-server commands will be auto-backgrounded, where logs go, and how to probe / stop.
+- `tool.execute.before` (only for `tool === "bash"`): if `looksLikeDevServer(command)`, mkdirs `<cwd>/.opencode/server-logs`, wraps the command, and stores `{ originalCmd, logPath }` in a per-factory `Map<callID, ...>` (capped at 256 entries). Sets `output.args.description = "background-launched: <first 80 chars>…"`.
+- `tool.execute.after` (only for `tool === "bash"`): if a tracked entry exists, appends a 4-line marker to `output.output` (idempotent — checks for the marker before appending; consumes the entry so a second call is a no-op).
+
+**Configuration**:
+
+- `opts.enabled` (default `true`): set to `false` to disable.
+- `opts.workspaceDir` (default `process.cwd()`): used as the logDir base.
+- `OPENCODE_MISSION_BASH_BG=0` env var forces disabled, regardless of `opts.enabled`.
+- `OPENCODE_MISSION_BASH_BG=1` is a no-op (the default is already enabled).
+
+**Why it does NOT skip subagent calls**: subagents calling bash with a dev-server command would still block their own subagent turn. The auto-rewrite is safe and useful for any caller. The mission-verify subagent is read-only and won't trigger this path; any other subagent that runs a dev server benefits from the rewrite.
+
+**Trade-offs**:
+
+- The wrapper adds ~400ms of latency to the bash tool even for a synchronous command that wasn't a dev server — wait, no, the wrapper only runs when `looksLikeDevServer` returns true. Non-dev commands are not touched.
+- The LLM is responsible for stopping background servers (e.g. `Get-Process | Stop-Process` on Windows, `kill <pid>` on Unix). A future session.idle sweep would clean up leftovers automatically, but v1 doesn't implement it.
+- `mkdirSync` failure causes the wrap to be skipped (the dev server runs synchronously and blocks the turn). Better than silently losing output to a non-existent log file.
+
+### 12. The ABSOLUTE RULE (command template)
 
 `src/command-template.ts` opens with an ABSOLUTE RULE instructing the LLM to make `CreateMission` its **first** tool call — no `GetMission` to "check if there's an existing mission", no `bash` to explore, no `todowrite` to plan. This bypasses the LLM's strong default of "look before you leap", which otherwise skips past the mission tool entirely and completes the task in normal mode.
 
@@ -175,7 +213,7 @@ Without the ABSOLUTE RULE, agents in headless `opencode run` testing have been o
 4. Never call `CreateMission` — the plugin stays inert
 5. `GetMission` after the fact still returns "No active mission" — no verification, no auto-complete, no self-audit injection
 
-### 9. Bash protocol (command template)
+### 13. Bash protocol (command template)
 
 The template also includes a bash protocol warning the LLM about two failure modes that block turns in this environment:
 
@@ -184,7 +222,7 @@ The template also includes a bash protocol warning the LLM about two failure mod
 
 Rules: one `bash` call per command; start dev servers in the background with explicit output redirection; probe endpoints with `Invoke-RestMethod`; clean up via `Get-Process | Where-Object | Stop-Process` before turn end.
 
-### 10. Naming conventions
+### 14. Naming conventions
 
 - Files: kebab-case (`create-mission.ts`)
 - Classes/types: PascalCase (`MissionStore`, `VerificationReport`)
@@ -208,7 +246,7 @@ Rules: one `bash` call per command; start dev servers in the background with exp
 A task is "done" only when all of the following pass:
 
 - [ ] `bun x tsc --noEmit` reports no errors
-- [ ] `bun run build` produces `dist/index.js` (~56 KB)
+- [ ] `bun run build` produces `dist/index.js` (~78 KB as of 0.3.7)
 - [ ] In an interactive TUI session: `/mission <objective>` causes the agent's **first** tool call to be `CreateMission`
 - [ ] The mission-verify subagent gets spawned after the main work is done
 - [ ] Auto-complete fires: `GetMission` returns "No active mission" after the JSON report parses with `verdict === "passed"`
