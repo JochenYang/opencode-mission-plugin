@@ -310,6 +310,85 @@ describe("FileMissionStorage", () => {
     const s = new FileMissionStorage()
     expect(s.mode).toBe("file")
   })
+
+  // ── findActiveMission (verify subagent fallback) ─────────────────────
+
+  test("findActiveMission returns null when no file exists", async () => {
+    const dir = tmpDir()
+    try {
+      const s = new FileMissionStorage({ directory: dir })
+      expect(await s.findActiveMission!()).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("findActiveMission returns the active mission with its sessionID key", async () => {
+    const dir = tmpDir()
+    try {
+      const s = new FileMissionStorage({ directory: dir })
+      const m = makeMission({ id: "m_xyz" })
+      await s.write("ses_parent", m)
+      const got = await s.findActiveMission!()
+      expect(got).not.toBeNull()
+      expect(got?.sessionID).toBe("ses_parent")
+      expect(got?.mission.id).toBe("m_xyz")
+      expect(got?.mission.status).toBe("active")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("findActiveMission skips non-active missions (paused / blocked / complete)", async () => {
+    const dir = tmpDir()
+    try {
+      const s = new FileMissionStorage({ directory: dir })
+      await s.write("ses_paused", makeMission({ status: "paused" }))
+      await s.write("ses_blocked", makeMission({ status: "blocked" }))
+      await s.write("ses_done", makeMission({ status: "complete" }))
+      // No active mission
+      expect(await s.findActiveMission!()).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("findActiveMission returns the most recently created when multiple active", async () => {
+    const dir = tmpDir()
+    try {
+      const s = new FileMissionStorage({ directory: dir })
+      // Earlier mission
+      await s.write(
+        "ses_older",
+        makeMission({ id: "m_old", createdAt: 1_000_000, updatedAt: 1_000_000 }),
+      )
+      // Later mission (newer createdAt)
+      await s.write(
+        "ses_newer",
+        makeMission({ id: "m_new", createdAt: 2_000_000, updatedAt: 2_000_000 }),
+      )
+      const got = await s.findActiveMission!()
+      expect(got?.sessionID).toBe("ses_newer")
+      expect(got?.mission.id).toBe("m_new")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("findActiveMission survives a corrupt file (returns null)", async () => {
+    const dir = tmpDir()
+    try {
+      const s = new FileMissionStorage({ directory: dir })
+      // Write a corrupt missions file
+      const p = join(dir, ".opencode", "missions.json")
+      const { mkdirSync, writeFileSync } = await import("node:fs")
+      mkdirSync(join(dir, ".opencode"), { recursive: true })
+      writeFileSync(p, "not-json{", "utf-8")
+      expect(await s.findActiveMission!()).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 // ─── Factory ────────────────────────────────────────────────────────────

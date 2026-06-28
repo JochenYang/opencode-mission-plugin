@@ -74,12 +74,25 @@ export function updateMissionTool(store: MissionStore) {
 
       // 'complete' from the verify sub-agent needs the parent missionSessionID,
       // because the mission is keyed on the parent session, not the verify
-      // sub-agent's own session.
-      if (args.status === "complete" && ctx.agent === "mission-verify" && !args.missionSessionID) {
-        return `Error: status="complete" requires missionSessionID to identify the parent mission. The verify sub-agent's context includes <session_id> for this purpose.`
+      // sub-agent's own session. If the verify subagent didn't get a
+      // <mission_context> block injected (V2 SDK parent lookup failed),
+      // fall back to scanning the local missions file for the active
+      // mission — that's the same workspace, so the file is available.
+      let resolvedMissionSessionID = args.missionSessionID
+      if (
+        args.status === "complete" &&
+        ctx.agent === "mission-verify" &&
+        !resolvedMissionSessionID
+      ) {
+        const active = await store.findActiveMission()
+        if (active) {
+          resolvedMissionSessionID = active.sessionID
+        } else {
+          return `Error: status="complete" requires missionSessionID to identify the parent mission. The verify sub-agent's context includes <session_id> for this purpose, or the plugin can fall back to scanning the local missions file when no <mission_context> was injected.`
+        }
       }
 
-      const targetSessionID = args.missionSessionID ?? ctx.sessionID
+      const targetSessionID = resolvedMissionSessionID ?? ctx.sessionID
 
       try {
         if (args.status === "complete") {

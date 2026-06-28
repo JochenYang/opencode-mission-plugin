@@ -57,6 +57,14 @@ export interface MissionStorage {
   write(sessionID: string, mission: Mission | null): Promise<void>
 
   /**
+   * Find the most recent active mission in this storage backend.
+   * Used by the verify subagent as a fallback when the V2 SDK
+   * session.get() fails to return the parent session info.
+   * Returns null if no active mission exists.
+   */
+  findActiveMission?(): Promise<{ sessionID: string; mission: Mission } | null>
+
+  /**
    * Optional boot-time health probe. Default no-op.
    */
   healthCheck?(): Promise<{ ok: boolean; detail?: string }>
@@ -174,6 +182,36 @@ export class FileMissionStorage implements MissionStorage {
       return { ok: true }
     } catch (err: any) {
       return { ok: false, detail: err?.message ?? String(err) }
+    }
+  }
+
+  /**
+   * Scan the local missions file and return the most recent mission with
+   * status === "active". This is the fallback for the verify subagent when
+   * the V2 SDK's session.get() returns null (so the subagent has no way to
+   * find its parent session ID through the SDK). The file is workspace-
+   * scoped, so a subagent running in the same workspace can read it
+   * directly without any network round-trip.
+   *
+   * Returns null if no active mission exists in this workspace.
+   */
+  async findActiveMission(): Promise<{ sessionID: string; mission: Mission } | null> {
+    try {
+      const all = this.readAll()
+      const activeEntries = Object.entries(all.missions).filter(
+        ([, m]) => m.status === "active",
+      )
+      if (activeEntries.length === 0) return null
+      // Most recently created wins (stable tie-breaker: lexicographic on
+      // sessionID so tests are deterministic).
+      activeEntries.sort(([, a], [, b]) => {
+        if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt
+        return a.id.localeCompare(b.id)
+      })
+      const [sessionID, mission] = activeEntries[0]
+      return { sessionID, mission }
+    } catch {
+      return null
     }
   }
 }

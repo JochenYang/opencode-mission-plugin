@@ -54,6 +54,18 @@ export class MissionStore {
     return this.storage.read(sessionID)
   }
 
+  /**
+   * Find the most recent active mission in the storage backend. Used by
+   * the verify subagent as a fallback when V2 SDK session.get() cannot
+   * resolve the parent session (e.g. when sandboxed or when the SDK
+   * returns null for a subagent's own session lookup). Returns null if
+   * no active mission exists.
+   */
+  async findActiveMission(): Promise<{ sessionID: string; mission: Mission } | null> {
+    if (!this.storage.findActiveMission) return null
+    return this.storage.findActiveMission()
+  }
+
   async snapshot(sessionID: string): Promise<{
     mission: Mission | null
     snapshot: import("./types.js").MissionSnapshot | null

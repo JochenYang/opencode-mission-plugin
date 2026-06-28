@@ -35,7 +35,7 @@ opencode-mission/
 │       ├── session-http.ts       # Session info lookup (parentID) for sub-agent routing
 │       └── format.ts             # Formatting helpers (duration, number, status output)
 ├── dist/
-│   └── index.js                  # Built single-file bundle (~78 KB as of 0.3.7)
+│   └── index.js                  # Built single-file bundle (~79 KB as of 0.3.8)
 ├── package.json
 ├── tsconfig.json
 ├── README.md                     # Chinese
@@ -246,7 +246,7 @@ Rules: one `bash` call per command; start dev servers in the background with exp
 A task is "done" only when all of the following pass:
 
 - [ ] `bun x tsc --noEmit` reports no errors
-- [ ] `bun run build` produces `dist/index.js` (~78 KB as of 0.3.7)
+- [ ] `bun run build` produces `dist/index.js` (~79 KB as of 0.3.8)
 - [ ] In an interactive TUI session: `/mission <objective>` causes the agent's **first** tool call to be `CreateMission`
 - [ ] The mission-verify subagent gets spawned after the main work is done
 - [ ] Auto-complete fires: `GetMission` returns "No active mission" after the JSON report parses with `verdict === "passed"`

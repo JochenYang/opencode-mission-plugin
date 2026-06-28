@@ -25,6 +25,13 @@ export function getMissionTool(store: MissionStore, http: SessionHttp) {
           const session = await http.getSession(ctx.sessionID)
           if (session?.parentID) {
             targetSessionID = session.parentID
+          } else {
+            // Fallback: scan the local missions file for the active
+            // mission. Used when the V2 SDK cannot resolve the parent
+            // (subagent sandbox, or SDK returns null for a subagent's
+            // own session).
+            const active = await store.findActiveMission()
+            if (active) targetSessionID = active.sessionID
           }
         }
         const mission = await store.read(targetSessionID)

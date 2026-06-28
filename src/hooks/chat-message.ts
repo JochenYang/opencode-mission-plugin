@@ -32,11 +32,18 @@ export function createChatMessageHook(deps: ChatMessageHookDeps): Pick<Hooks, "c
       // Only act on the mission-verify subagent
       if (input.agent !== "mission-verify") return
 
-      // Find the parent session
+      // Find the parent session. Try the V2 SDK first; fall back to scanning
+      // the local missions file when the SDK returns null (the SDK lookup
+      // can fail for subagent sessions in some opencode configurations).
       const session = await http.getSession(input.sessionID)
-      if (!session?.parentID) return
+      let parentID = session?.parentID
+      if (!parentID && store.findActiveMission) {
+        const active = await store.findActiveMission()
+        if (active) parentID = active.sessionID
+      }
+      if (!parentID) return
 
-      const mission = await store.read(session.parentID)
+      const mission = await store.read(parentID)
       if (!mission) return
 
       // Inject mission context into the user message
@@ -45,7 +52,7 @@ export function createChatMessageHook(deps: ChatMessageHookDeps): Pick<Hooks, "c
           ;(part as any).text = subagentMissionContext(
             mission,
             (part as any).text,
-            session.parentID,
+            parentID,
           )
         }
       }
