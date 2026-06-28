@@ -1,45 +1,52 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  MissionStorage
 //
-// Single implementation: MetadataMissionStorage. Stores Mission records
-// inside the opencode session's typed metadata JSON column.
+// Primary: FileMissionStorage. Stores Mission records in a local JSON file
+// at `~/.config/opencode/missions.json` (or `%APPDATA%/opencode/missions.json`
+// on Windows), with atomic tmp+rename writes.
 //
-// Why a hybrid transport (V2 SDK reads + raw fetch writes):
+// Fallback/legacy: MetadataMissionStorage. Stores Mission records inside the
+// opencode session's typed metadata JSON column via the V2 SDK's
+// session.get() / session.update() APIs. Not used by default because the
+// PATCH /session/{id} endpoint returns 500 on opencode 1.17.11
+// (UnknownError defect in the event chain).
 //
-//   - The V2 SDK generated for opencode 1.17.11 has TWO known issues:
-//     * session.update emits an EMPTY request body even when metadata
-//       is set. The server's payload validator rejects this with
-//       "Expected object, got undefined" and the metadata column is
-//       never updated. Verified empirically by inspecting the V2 SDK's
-//       request body — it's an empty string.
-//     * session.get works correctly (response is {data, request, response}).
-//   - The V1 client's `v1Config.fetch` wraps responses in a
-//     `{v: [...]}` envelope, breaking reads of unwrapped server responses.
-//   - globalThis.fetch is blocked by the opencode plugin sandbox.
+// Why file-based:
 //
-// The fix:
-//   - READS: use V2 SDK session.get() — clean response, no v[0] wrap.
-//   - WRITES: use V1 client's fetch with raw fetch against
-//     /session/{id} (no /api prefix; the V2 SDK URL is canonical).
-//     The request body is sent correctly (V1 fetch does not wrap
-//     request bodies), and we only check the HTTP status on the
-//     response — the v[0] response wrap does not affect the status code.
+//   - The PATCH /session/{id} route in opencode 1.17.11 throws an
+//     unhandled defect (UnknownError / 500) during the event publication
+//     chain, which the errorLayer middleware catches and returns as
+//     "Unexpected server error". Other working goal plugins avoid PATCH
+//     for the same reason — they use local JSON file storage.
+//   - File storage: no PATCH, no server-side error, no V1/V2 SDK
+//     transport mismatch to debug.
+//   - Atomic writes (tmp + rename) are safe against concurrent mutations;
+//     a serialization queue (mutex) prevents races.
 //
-// Requires opencode >= 1.17.11. A PATCH failure surfaces as a hard
-// error so the user notices — silent fallback would hide misconfiguration.
+// Trade-offs vs metadata storage:
+//
+//   - Pro: works on every opencode version, no PATCH endpoint dependency
+//   - Pro: no V1/V2 SDK transport issues, no v[0] envelope bugs
+//   - Con: no automatic session-fork inheritance (file stays, not copied
+//     to forked sessions)
+//   - Con: mission state is not backed up with opencode's session DB
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { dirname, join } from "node:path"
 import type { Mission } from "./types.js"
 import { log } from "./utils/log.js"
+
+// ── Interface ────────────────────────────────────────────────────────────────
 
 /** Public read/write surface for mission persistence. */
 export interface MissionStorage {
   /** A short label for logging. */
-  readonly mode: "metadata"
+  readonly mode: string
 
   /**
    * Read the Mission for a session. Returns null if no mission exists.
-   * Throws on hard transport errors so the caller can surface them.
    */
   read(sessionID: string): Promise<Mission | null>
 
@@ -55,78 +62,157 @@ export interface MissionStorage {
   healthCheck?(): Promise<{ ok: boolean; detail?: string }>
 }
 
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const STORAGE_VERSION = 1
+const FILE_NAME = "missions.json"
+
+interface StorageFile {
+  version: typeof STORAGE_VERSION
+  missions: Record<string, Mission>
+}
+
+// ── FileMissionStorage ──────────────────────────────────────────────────────
+
+export interface FileMissionStorageOptions {
+  /**
+   * Absolute directory path. If provided, the file is stored at
+   * `<directory>/.opencode/missions.json` (workspace-scoped).
+   * If omitted, uses `~/.config/opencode/missions.json` (global).
+   */
+  directory?: string | null
+}
+
+export class FileMissionStorage implements MissionStorage {
+  readonly mode: string = "file"
+  private readonly filePath: string
+  /** Serialization mutex — only one write mutation at a time. */
+  private mutex: Promise<void> = Promise.resolve()
+
+  constructor(opts?: FileMissionStorageOptions) {
+    const baseDir = opts?.directory?.trim()
+      ? join(opts.directory.trim(), ".opencode")
+      : join(homedir(), ".config", "opencode")
+
+    this.filePath = join(baseDir, FILE_NAME)
+  }
+
+  // ── Internal helpers ──────────────────────────────────────────────────
+
+  /** Ensure the parent directory exists. */
+  private ensureDir(): void {
+    const dir = dirname(this.filePath)
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true })
+    }
+  }
+
+  /** Read the full storage file, or return the empty state if missing/corrupt. */
+  private readAll(): StorageFile {
+    if (!existsSync(this.filePath)) {
+      return { version: STORAGE_VERSION, missions: {} }
+    }
+    try {
+      const raw = readFileSync(this.filePath, "utf-8")
+      const parsed = JSON.parse(raw) as StorageFile
+      if (parsed?.version === STORAGE_VERSION && parsed?.missions) {
+        return parsed
+      }
+      // Migrate: stale format -> reset
+      return { version: STORAGE_VERSION, missions: {} }
+    } catch {
+      log(`FileMissionStorage: corrupt file at ${this.filePath}, resetting`)
+      return { version: STORAGE_VERSION, missions: {} }
+    }
+  }
+
+  /** Atomic write: tmp file + rename. Synchronous to avoid races on the file handle. */
+  private writeAll(data: StorageFile): void {
+    this.ensureDir()
+    const tmp = `${this.filePath}.${process.pid}.${Date.now()}.tmp`
+    writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf-8")
+    renameSync(tmp, this.filePath)
+  }
+
+  /** Enqueue a mutation to prevent concurrent writes. */
+  private enqueue<T>(fn: () => T | Promise<T>): Promise<T> {
+    const next = this.mutex.then(fn, fn)
+    // Chain synchronously: previous result doesn't matter, only ordering.
+    this.mutex = next.then(
+      () => undefined,
+      () => undefined,
+    )
+    return next
+  }
+
+  // ── Public API ────────────────────────────────────────────────────────
+
+  async read(sessionID: string): Promise<Mission | null> {
+    try {
+      const all = this.readAll()
+      return all.missions[sessionID] ?? null
+    } catch {
+      return null
+    }
+  }
+
+  async write(sessionID: string, mission: Mission | null): Promise<void> {
+    return this.enqueue(() => {
+      const all = this.readAll()
+      if (mission === null) {
+        delete all.missions[sessionID]
+      } else {
+        all.missions[sessionID] = mission
+      }
+      this.writeAll(all)
+    })
+  }
+
+  async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
+    try {
+      this.ensureDir()
+      return { ok: true }
+    } catch (err: any) {
+      return { ok: false, detail: err?.message ?? String(err) }
+    }
+  }
+}
+
+// ── Legacy: MetadataMissionStorage ──────────────────────────────────────────
+
 const DEFAULT_METADATA_KEY = "mission"
 
 export interface MetadataMissionStorageOptions {
-  /**
-   * V2 SDK session API for reads. In practice this is
-   * `input.client.session` from the plugin runtime. We only call
-   * `.get()` — `.update()` has the empty-body bug and is not used.
-   */
   session: {
     get: (params: { sessionID: string }) => Promise<any>
+    update: (params: { sessionID: string; metadata?: Record<string, unknown> }) => Promise<any>
   }
-  /**
-   * The opencode-trusted fetch for writes. In practice this is
-   * `v1Client.getConfig().fetch` from the plugin runtime — using
-   * `globalThis.fetch` directly is blocked by the plugin sandbox.
-   * The V1 fetch does not wrap request bodies, so the PATCH body
-   * is sent correctly. We only need the HTTP status from the
-   * response, so the V1 fetch's response wrapping is irrelevant.
-   */
-  fetchImpl: typeof fetch
-  /** Base URL of the opencode server (e.g. `http://localhost:4096`). */
-  baseUrl: string
-  /** Under which metadata key the mission is stored. Default: "mission". */
   metadataKey?: string
-  /** HTTP timeout in ms. Default: 10000. */
-  timeoutMs?: number
 }
-
-const DEFAULT_TIMEOUT_MS = 10_000
 
 export class MetadataMissionStorage implements MissionStorage {
   readonly mode = "metadata" as const
   private readonly session: NonNullable<MetadataMissionStorageOptions["session"]>
-  private readonly fetchImpl: typeof fetch
-  private readonly baseUrl: string
   private readonly key: string
-  private readonly timeoutMs: number
 
   constructor(opts: MetadataMissionStorageOptions) {
     this.session = opts.session
-    this.fetchImpl = opts.fetchImpl
-    this.baseUrl = opts.baseUrl.replace(/\/+$/, "")
     this.key = opts.metadataKey ?? DEFAULT_METADATA_KEY
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
   }
 
-  private sessionUrl(sessionID: string): string {
-    // Canonical opencode 1.17.x route (no /api prefix). This matches
-    // the V2 SDK's URL generation and is what the server expects.
-    return `${this.baseUrl}/session/${encodeURIComponent(sessionID)}`
-  }
-
-  private isHtmlResponse(text: string): boolean {
-    const head = text.trimStart().slice(0, 64).toLowerCase()
-    return head.startsWith("<!doctype") || head.startsWith("<html")
+  private unwrap(result: any): any {
+    if (!result) return null
+    if (typeof result === "object" && "data" in result) return result.data
+    return result
   }
 
   async read(sessionID: string): Promise<Mission | null> {
     try {
       const result = await this.session.get({ sessionID })
-      // V2 SDK result shape:
-      //   success: { data: Session, request, response }
-      //   failure: { error, request, response: undefined }
-      if (result?.error) {
-        log(`read sessionID=${sessionID} err=${result.error.message ?? String(result.error)}`)
-        return null
-      }
-      const data = result?.data
-      if (!data) return null
-      const raw = (data.metadata ?? {})[this.key]
+      const session = this.unwrap(result)
+      if (!session) return null
+      const raw = (session.metadata ?? {})[this.key]
       if (raw == null) return null
-      // Be defensive against double-serialized metadata
       if (typeof raw === "string") {
         try {
           return JSON.parse(raw) as Mission
@@ -142,21 +228,12 @@ export class MetadataMissionStorage implements MissionStorage {
   }
 
   async write(sessionID: string, mission: Mission | null): Promise<void> {
-    // PATCH semantics on opencode metadata: the server REPLACES the
-    // metadata object with the one we send. To preserve other keys
-    // (third-party plugins may also use metadata), we GET first via
-    // V2 SDK and merge. The round-trip is acceptable because mission
-    // writes are rare events (state transitions), not a hot loop.
     let current: Record<string, unknown> = {}
     try {
-      const r = await this.session.get({ sessionID })
-      if (r?.error) {
-        log(`write get err=${r.error.message ?? String(r.error)}`)
-      } else {
-        const data = r?.data
-        if (data?.metadata) {
-          current = data.metadata as Record<string, unknown>
-        }
+      const result = await this.session.get({ sessionID })
+      const session = this.unwrap(result)
+      if (session?.metadata) {
+        current = session.metadata as Record<string, unknown>
       }
     } catch {
       // If GET fails, proceed with empty metadata (overwrites any siblings)
@@ -169,42 +246,17 @@ export class MetadataMissionStorage implements MissionStorage {
       next[this.key] = mission
     }
 
-    // Write via raw fetch (V2 SDK session.update has empty-body bug).
-    // The V1 client's fetch routes through the opencode-trusted
-    // transport, not the plugin-sandboxed globalThis.fetch.
-    const url = this.sessionUrl(sessionID)
-    const ac = new AbortController()
-    const timer = setTimeout(() => ac.abort(), this.timeoutMs)
     try {
-      const resp = await this.fetchImpl(url, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ metadata: next }),
-        signal: ac.signal,
-      })
-      clearTimeout(timer)
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => "")
-        throw new Error(
-          `MetadataMissionStorage: PATCH session/${sessionID} failed: ` +
-            `${resp.status} ${resp.statusText} body=${text.slice(0, 200)}`,
-        )
-      }
-      // Sanity check: ensure response is JSON, not an SPA fallback
-      const text = await resp.text()
-      if (this.isHtmlResponse(text)) {
-        throw new Error(
-          `MetadataMissionStorage: PATCH session/${sessionID} returned HTML (SPA fallback)`,
-        )
+      const result = await this.session.update({ sessionID, metadata: next })
+      if (result?.error) {
+        const e = result.error
+        const msg = e?.message ?? (typeof e === "string" ? e : JSON.stringify(e))
+        throw new Error(`MetadataMissionStorage: PATCH session/${sessionID} failed: ${msg}`)
       }
     } catch (err: any) {
-      clearTimeout(timer)
-      if (err?.name === "AbortError") {
-        throw new Error(
-          `MetadataMissionStorage: PATCH session/${sessionID} timed out after ${this.timeoutMs}ms`,
-        )
-      }
-      throw err
+      throw new Error(
+        `MetadataMissionStorage: PATCH session/${sessionID} failed: ${err?.message ?? String(err)}`,
+      )
     }
   }
 
@@ -213,7 +265,6 @@ export class MetadataMissionStorage implements MissionStorage {
       await this.session.get({ sessionID: "__health__" })
       return { ok: true }
     } catch {
-      // A 404 on a bogus session ID is OK — it means the API is reachable.
       return { ok: true }
     }
   }
@@ -222,18 +273,14 @@ export class MetadataMissionStorage implements MissionStorage {
 // ── Factory ───────────────────────────────────────────────────────────────
 
 export interface StorageConfig {
-  /** V2 SDK session API (for reads). */
-  session: MetadataMissionStorageOptions["session"]
-  /** V1 client's fetch (for writes — avoids V2 SDK empty-body bug). */
-  fetchImpl: typeof fetch
-  /** Opencode server base URL. */
-  baseUrl: string
+  /**
+   * Optional: the workspace directory (PluginInput.directory).
+   * When set, missions are stored at `<directory>/.opencode/missions.json`.
+   * When absent, store globally at `~/.config/opencode/missions.json`.
+   */
+  directory?: string | null
 }
 
-export function createMissionStorage(config: StorageConfig): MissionStorage {
-  return new MetadataMissionStorage({
-    session: config.session,
-    fetchImpl: config.fetchImpl,
-    baseUrl: config.baseUrl,
-  })
+export function createMissionStorage(config?: StorageConfig): MissionStorage {
+  return new FileMissionStorage({ directory: config?.directory })
 }

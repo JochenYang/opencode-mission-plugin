@@ -48,16 +48,19 @@ opencode-mission/
 
 ### 0. Storage
 
-Mission persistence is handled by the `MissionStorage` interface (`src/mission-storage.ts`). The only implementation is `MetadataMissionStorage`: it PATCHes the opencode session's metadata JSON column (`Session.metadata.mission`) via the canonical `PATCH /session/:sessionID` endpoint.
+Mission persistence is handled by the `MissionStorage` interface (`src/mission-storage.ts`). The primary implementation is `FileMissionStorage`: it stores missions in a local JSON file at `<workspace>/.opencode/missions.json` (or `~/.config/opencode/missions.json` globally), with atomic tmp+rename writes.
 
-Why this approach:
-- **Free session-fork inheritance**: when a session is forked, the opencode server copies the parent's `Session.metadata` into the child automatically. The new session already has the mission — no plugin-side wiring.
-- **Centralized backup**: mission state rides along with the rest of the user's opencode data (sessions, messages, etc.) in the SQLite store. No separate mission file to back up.
-- **No extra filesystem footprint**: the mission lives where the session lives.
+Why file-based:
+- **PATCH /session/{id} returns 500** on opencode 1.17.11 (unhandled `UnknownError` defect in the session event chain). Other working goal plugins also use local file storage for this reason.
+- **No server-side transport bugs**: no V1 `v[0]` envelope unwrap issue, no V2 SDK empty-body bug.
+- **Atomic writes**: temp file + rename provides crash-safe persistence.
+- **Works on any opencode version** — no PATCH endpoint dependency.
 
-Requires opencode >= 1.17.11 (the PATCH endpoint has shipped there). On builds that don't expose the endpoint, write() throws — operators who need a workaround should upgrade opencode. There is no silent fallback; hiding PATCH failures would corrupt the user's workflow.
+Trade-offs vs metadata storage:
+- **Fork inheritance lost**: file stays in the original workspace; forked sessions don't inherit the mission automatically.
+- **No centralized backup**: mission state lives in its own file, not in the opencode SQLite session DB.
 
-The factory in `mission-storage.ts` is the only entry point. `SessionHttp` keeps the legacy `readMission` / `writeMission` methods as thin shims that delegate to the storage, so existing call sites in `MissionStore`, hooks, and tools did not need to change. New code should depend on `MissionStorage` directly.
+The factory in `mission-storage.ts` is the only entry point. `SessionHttp` handles session-info lookup (parentID, metadata read), not mission persistence.
 
 To add a different backend: implement the `MissionStorage` interface (three methods: `read`, `write`, optional `healthCheck`), export a new factory in `mission-storage.ts`. Tests in `tests/mission-storage.test.ts` show the contract.
 
@@ -192,8 +195,8 @@ Rules: one `bash` call per command; start dev servers in the background with exp
 ## Important constraints
 
 1. **DO NOT** modify `mission-store.ts:assertTransition` without updating `DESIGN.md §2` (state transition table).
-2. **DO NOT** bypass the `MissionStorage` abstraction. Mission state lives inside the opencode session's metadata column (`Session.metadata.mission`) via `PATCH /session/:sessionID`. `SessionHttp` only handles session-info lookup (parentID, metadata read), not mission persistence. Adding a new storage backend means implementing the `MissionStorage` interface in `src/mission-storage.ts`.
-3. **DO NOT** reintroduce a file-based storage backend. Mission state lives inside the opencode session's metadata column on purpose — file mode was removed in 0.3.0 because it had no fork inheritance, no centralized backup, and a duplicate on-disk layout to maintain. If you genuinely need a file backend for a specific environment, document the reason in a PR and update this constraint.
+2. **DO NOT** bypass the `MissionStorage` abstraction. Mission state lives in a local JSON file managed by `FileMissionStorage`. `SessionHttp` only handles session-info lookup (parentID, metadata read), not mission persistence. Adding a new storage backend means implementing the `MissionStorage` interface in `src/mission-storage.ts`.
+3. **DO NOT** reintroduce session-metadata-based storage as the default. Metadata persistence (PATCH /session/{id}) returns 500 on opencode 1.17.11 (defect in the server's event chain). If the opencode server eventually fixes this, `MetadataMissionStorage` is still available in `src/mission-storage.ts` as a legacy option, but `FileMissionStorage` is the default.
 4. **DO NOT** introduce `as any` in tool code; use `ctx.agent` to distinguish main vs sub.
 5. **DO NOT** leak `terminalReason` into the continuation prompt (it goes in the system injection, the continuation prompt stays clean).
 6. **DO NOT** remove the ABSOLUTE RULE from `command-template.ts` — without it, agents skip `CreateMission` and the entire plugin stays inert.
@@ -213,7 +216,7 @@ A task is "done" only when all of the following pass:
 - [ ] `/mission budget set turns=2` followed by enough work causes the mission to transition to `budget_limited` (not `blocked`)
 - [ ] User Esc during autonomous work -> mission transitions to `paused`; `/mission resume` re-activates and wallclock resumes from where it was frozen
 - [ ] A non-`mission-verify` subagent calling `UpdateMission` receives the "not authorized" error
-- [ ] Mission state persists across opencode server restarts (stored in the opencode session's metadata column at `Session.metadata.mission`)
+- [ ] Mission state persists across opencode server restarts (stored in local JSON file)
 
 ## Known limitations
 

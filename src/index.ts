@@ -13,7 +13,7 @@
 
 import type { Plugin, PluginModule, PluginInput, Hooks } from "@opencode-ai/plugin"
 import { MissionStore } from "./mission-store.js"
-import { createSessionHttp, extractV1Client } from "./utils/session-http.js"
+import { createSessionHttp } from "./utils/session-http.js"
 import { createMissionStorage } from "./mission-storage.js"
 import { createMissionTool } from "./tools/create-mission.js"
 import { updateMissionTool } from "./tools/update-mission.js"
@@ -29,42 +29,27 @@ import { VERIFY_AGENT_PROMPT } from "./verify/verify-prompt.js"
 
 const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
   // Client initialization.
-  // The opencode runtime injects a V2 SDK OpencodeClient as input.client.
-  // The V2 SDK has TWO known issues for our use case:
-  //   - session.update emits an empty request body (server rejects).
-  //   - get responses were OK in 0.3.4, but for the parent-lookup case
-  //     we also want a fallback to raw fetch.
-  // Solution: a hybrid transport —
-  //   - READS use the V2 SDK session.get() (clean response, no v[0] wrap).
-  //   - WRITES use raw fetch via the V1 client's fetch, which routes
-  //     through the opencode-trusted transport (the plugin's
-  //     globalThis.fetch is blocked by the sandbox).
-  //   - PROMPTASYNC (continuation) uses the V2 SDK; no body bug there.
+  // We use `input.client` (V2 SDK OpencodeClient) for session-info lookup
+  // (parent session ID for sub-agent routing), NOT for mission persistence.
+  // Mission persistence is handled by FileMissionStorage (local JSON file).
+  //
+  // File storage avoids the PATCH /session/{id} 500 error on opencode
+  // 1.17.11 (UnknownError defect in the event chain), and avoids the V1
+  // client fetch's `v[0]` envelope unwrap bug entirely.
   const client = input.client as any
-  const v1Client = extractV1Client(input.client)
-  const v1Config = v1Client?.getConfig?.() ?? {}
-  const fetchImpl = v1Config.fetch
-  const baseUrl = input.serverUrl.origin
-
   if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-    const hasV1 = !!fetchImpl
-    log(`mission client init baseUrl=${baseUrl} v1Fetch=${hasV1 ? "ok" : "MISSING"}`)
+    log(`mission client init baseUrl=${input.serverUrl.origin} directory=${input.directory}`)
   }
-
-  const storage = createMissionStorage({
-    session: client.session,
-    fetchImpl,
-    baseUrl,
-  })
+  const storage = createMissionStorage({ directory: input.directory })
   if (process.env.OPENCODE_MISSION_DEBUG === "1") {
-    log(`mission storage mode=${storage.mode}`)
+    log(`mission storage mode=${storage.mode} path=${(storage as any).filePath ?? "(unknown)"}`)
   }
   // Kick off a non-fatal health check so config mistakes surface in the log
   storage.healthCheck?.().then((h) => {
     if (!h.ok) log(`mission storage health check failed: ${h.detail ?? "unknown"}`)
   })
 
-  const http = createSessionHttp({ fetchImpl, baseUrl })
+  const http = createSessionHttp({ client })
 
   const store = new MissionStore(storage, http)
 
