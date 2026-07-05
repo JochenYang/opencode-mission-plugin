@@ -45,9 +45,16 @@ export function updateMissionTool(store: MissionStore) {
         ),
     },
     async execute(args, ctx: ToolContext): Promise<ToolResult> {
-      // Subagents other than mission-verify cannot update mission status.
-      if (ctx.agent !== "build" && ctx.agent !== "mission-verify") {
-        return `Error: agent "${ctx.agent}" is not authorized to update mission status. Only the main session can.`
+      // Known subagent types dispatched by the main session via the `task`
+      // tool. They should NOT manage mission state — that's the main session's
+      // responsibility. All other agent types (build, forge, plan, general,
+      // and other main-session agents) are allowed to manage missions.
+      const SUBAGENT_TYPES = new Set([
+        "builder", "dba", "detective", "explore", "guard",
+        "ops", "perf", "reviewer", "tester",
+      ])
+      if (SUBAGENT_TYPES.has(ctx.agent) && ctx.agent !== "mission-verify") {
+        return `Error: agent "${ctx.agent}" is a subagent and is not authorized to update mission status. Only the main session can.`
       }
 
       // 'complete' is reserved for the mission-verify sub-agent under

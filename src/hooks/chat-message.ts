@@ -67,13 +67,19 @@ export function createChatMessageHook(deps: ChatMessageHookDeps): Pick<Hooks, "c
     "experimental.text.complete": async (input, output) => {
       // Only act on the mission-verify subagent
       const session = await http.getSession(input.sessionID)
-      if (!session?.parentID) return
+      let parentID = session?.parentID
+      // Fallback: scan the local missions file when V2 SDK lookup fails
+      // (same pattern as the chat.message handler above).
+      if (!parentID && store.findActiveMission) {
+        const active = await store.findActiveMission()
+        if (active) parentID = active.sessionID
+      }
+      if (!parentID) return
 
       const text = output.text
       if (!text || !text.includes("verdict")) return
 
       const report = tryParseVerifyJson(text)
-      const parentID = session.parentID
 
       if (!report) {
         // Fail-open: the judge failed to produce parseable output. Without

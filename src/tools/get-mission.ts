@@ -19,9 +19,15 @@ export function getMissionTool(store: MissionStore, http: SessionHttp) {
     args: {},
     async execute(_args, ctx: ToolContext): Promise<ToolResult> {
       try {
+        // Known subagent types dispatched by the main session via the `task`
+        // tool. These should read the PARENT session's mission instead of their own.
+        const SUBAGENT_TYPES = new Set([
+          "builder", "dba", "detective", "explore", "guard",
+          "ops", "perf", "reviewer", "tester",
+        ])
         // Subagents: read the parent session's mission
         let targetSessionID = ctx.sessionID
-        if (ctx.agent !== "build") {
+        if (SUBAGENT_TYPES.has(ctx.agent)) {
           const session = await http.getSession(ctx.sessionID)
           if (session?.parentID) {
             targetSessionID = session.parentID
