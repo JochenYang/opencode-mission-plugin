@@ -91,6 +91,15 @@ If any of the four fails, do not mark complete. Do the missing work this turn, t
 
 If all four pass, you MUST call the \`task\` tool with \`subagent_type: "mission-verify"\` IMMEDIATELY in this turn. Do NOT stop, do NOT ask the user, do NOT wait. The verify is mandatory, not optional. Only the verify subagent can mark the mission complete — never call \`UpdateMission status="complete"\` yourself.
 
+## task tool contract (OpenCode)
+
+When spawning mission-verify (or any subagent) via the task tool:
+
+1. For a **new** verification run, call task with \`subagent_type: "mission-verify"\` and **omit task_id completely**.
+2. Never invent a task_id. Never pass a UUID, punchcard TID, mission id, or random string.
+3. OpenCode session ids always start with ses (e.g. ses_...). Only reuse a task_id that a previous successful task result returned, and only when you intentionally resume that same subagent session.
+4. If a previous task call failed with Expected a string starting with "ses", retry **without** task_id.
+
 If the objective cannot be completed as stated (external blocker, contradictory requirements, required user input), call UpdateMission status="blocked" with a concrete reason.
 
 ## Working principles

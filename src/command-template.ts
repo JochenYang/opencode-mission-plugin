@@ -74,6 +74,16 @@ A plan, summary, or first pass is NOT a complete result. If any dimension fails,
 
 After 4-dimension self-audit:
 - **All four pass**: you MUST call the \`task\` tool with \`subagent_type: "mission-verify"\` IMMEDIATELY in the same turn. Do NOT stop, do NOT ask the user, do NOT wait for confirmation. The verify is REQUIRED, not optional.
+
+## task tool contract (OpenCode)
+
+When spawning mission-verify (or any subagent) via the task tool:
+
+1. For a **new** verification run, call task with \`subagent_type: "mission-verify"\` and **omit task_id completely**.
+2. Never invent a task_id. Never pass a UUID, punchcard TID, mission id, or random string.
+3. OpenCode session ids always start with ses (e.g. ses_...). Only reuse a task_id that a previous successful task result returned, and only when you intentionally resume that same subagent session.
+4. If a previous task call failed with Expected a string starting with "ses", retry **without** task_id.
+
 - **Any dimension fails**: do the missing work in this turn and re-audit. Do NOT stop to ask the user.
 - **Cannot make all four pass**: call \`UpdateMission status="blocked"\` with a clear reason.
 

@@ -23,6 +23,7 @@ import { createEventHook } from "./hooks/event-hook.js"
 import { createChatMessageHook } from "./hooks/chat-message.js"
 import { createSystemTransformHook } from "./hooks/system-transform.js"
 import { createCommandExecuteHook } from "./hooks/command-execute.js"
+import { createTaskToolGuardHook } from "./hooks/task-tool-guard.js"
 import { log } from "./utils/log.js"
 import { MISSION_COMMAND_TEMPLATE } from "./command-template.js"
 import { VERIFY_AGENT_PROMPT } from "./verify/verify-prompt.js"
@@ -75,6 +76,7 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
   const chatMessageHook = createChatMessageHook({ store, http, log })
   const systemTransformHook = createSystemTransformHook({ store, log })
   const commandExecuteHook = createCommandExecuteHook()
+  const taskToolGuardHook = createTaskToolGuardHook({ log })
 
   return {
     tool: {
@@ -100,7 +102,7 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
         cfg.agent["mission-verify"] = {
           mode: "subagent",
           description:
-            "Independent mission verification agent. Reads the active mission via GetMission, then inspects the codebase to determine whether the completion criterion is met. Returns a structured 4-dimension JSON report (completeness/correctness/integration/robustness). Use this agent via the Task tool when you believe the mission is done.",
+            "Independent mission verification agent. Reads the active mission via GetMission, then inspects the codebase to determine whether the completion criterion is met. Returns a structured 4-dimension JSON report (completeness/correctness/integration/robustness). Use this agent via the Task tool when you believe the mission is done. Always omit task_id for a new verify run; only pass a previous task result session id that starts with ses if intentionally resuming.",
           prompt: VERIFY_AGENT_PROMPT,
         }
       }
@@ -111,6 +113,7 @@ const serverPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
     "experimental.text.complete": chatMessageHook["experimental.text.complete"],
     "experimental.chat.system.transform": systemTransformHook["experimental.chat.system.transform"],
     "command.execute.before": commandExecuteHook["command.execute.before"],
+    "tool.execute.before": taskToolGuardHook["tool.execute.before"],
   } as any
 }
 
